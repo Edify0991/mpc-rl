@@ -9,7 +9,7 @@ from pathlib import Path
 
 import mujoco
 
-from mjlab.actuator import BuiltinPositionActuatorCfg
+from mjlab.actuator import BuiltinMotorActuatorCfg, BuiltinPositionActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.utils.os import update_assets
 from mjlab.utils.spec_config import CollisionCfg
@@ -375,6 +375,21 @@ THEMIS_ARTICULATION = EntityArticulationInfoCfg(
 )
 
 
+# Hybrid imitation applies its reference PD law explicitly. Position actuators
+# cannot accept an externally computed effort command, so this alternate entity
+# uses torque motors and ``HybridMimicAction`` supplies the PD law.
+THEMIS_EFFORT_ARTICULATION = EntityArticulationInfoCfg(
+  actuators=(
+    BuiltinMotorActuatorCfg(target_names_expr=("HIP_YAW_.*", "HIP_ROLL_.*"), effort_limit=PANDA_P.effort_limit, armature=PANDA_P.armature),
+    BuiltinMotorActuatorCfg(target_names_expr=("HIP_PITCH_.*", "KNEE_PITCH_.*"), effort_limit=KODIAK.effort_limit, armature=KODIAK.armature),
+    BuiltinMotorActuatorCfg(target_names_expr=("ANKLE_PITCH_.*", "ANKLE_ROLL_.*"), effort_limit=KOALA_MB_ANKLE.effort_limit, armature=KOALA_MB_ANKLE.armature),
+    BuiltinMotorActuatorCfg(target_names_expr=("SHOULDER_.*", "ELBOW_.*", "WRIST_.*"), effort_limit=KOALA_MB_ARM.effort_limit, armature=KOALA_MB_ARM.armature),
+    BuiltinMotorActuatorCfg(target_names_expr=("HEAD_.*",), effort_limit=KOALA.effort_limit, armature=KOALA.armature),
+  ),
+  soft_joint_pos_limit_factor=0.9,
+)
+
+
 def get_themis_robot_cfg(loco_manip: bool = False) -> EntityCfg:
   """Get a fresh THEMIS robot configuration instance.
 
@@ -390,6 +405,16 @@ def get_themis_robot_cfg(loco_manip: bool = False) -> EntityCfg:
     collisions=(FEET_ONLY_COLLISION, HAND_CONTACT_COLLISION),
     spec_fn=get_spec,
     articulation=THEMIS_ARTICULATION,
+  )
+
+
+def get_themis_effort_robot_cfg(loco_manip: bool = False) -> EntityCfg:
+  """THEMIS with torque motors for explicit hybrid reference-PD control."""
+  return EntityCfg(
+    init_state=HOME_KEYFRAME_LOCO_MANIP if loco_manip else HOME_KEYFRAME_WALKING,
+    collisions=(FEET_ONLY_COLLISION, HAND_CONTACT_COLLISION),
+    spec_fn=get_spec,
+    articulation=THEMIS_EFFORT_ARTICULATION,
   )
 
 

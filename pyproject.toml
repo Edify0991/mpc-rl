@@ -46,3 +46,8 @@ themis_training = "themis_training"
 
 [project.scripts]
 finetune = "themis_training.finetune:main"
+export-reference-centroidal = "themis_training.export_reference_centroidal:main"
+process-reference-centroidal = "themis_training.process_reference_centroidal:main"
+plot-reference-centroidal = "themis_training.plot_reference_centroidal:main"
+process-sim2sim-centroidal = "themis_training.process_sim2sim_centroidal:main"
+plot-sim2sim-centroidal-comparison = "themis_training.plot_sim2sim_centroidal_comparison:main"

@@ -44,3 +44,5 @@ Thumbs.db
 
 # ── Notebooks ───────────────────────────────────────────────────────────
 *.ipynb
+
+assets/ref_motion/

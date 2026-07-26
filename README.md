@@ -35,6 +35,82 @@ proposed batch MPC solver **$\pi^n$ MPC** in JAX and PyTorch.
 |---|---|
 | `Mjlab-MPC-Guided-Locomotion-Themis` | MPC-guided velocity locomotion on flat terrain. |
 | `Mjlab-MPC-Guided-Loco-manipulation-Themis` | MPC-guided loco-manipulation — walking and pushing a box. |
+| `Mjlab-HybridMimic-MPC-Residual-Themis` | Hybrid imitation: frozen motion tracker + MPC-guided residual contact policy. |
+| `Mjlab-Hierarchical-HybridMimic-MPC-Themis` | Jointly trained whole-body mimic residuals with a 10 Hz bounded MPC-parameter action. |
+| `Mjlab-MPC-RL-Mimic-Contact-Themis` | Basic contact-aware MPC-RL motion imitation; no slow MPC-parameter action. |
+| `Mjlab-MPC-RL-Mimic-Student-Themis` | Causal 29-D joint-target student for Phase-2 DAgger/PPO training. |
+| `Mjlab-MotionTracker-Themis` | Stage-one BeyondMimic-style motion tracker. |
+
+## Hybrid motion imitation
+
+`Mjlab-HybridMimic-MPC-Residual-Themis` uses reference PD tracking:
+
+```text
+tau = Kp(q_tracker - q) + Kd(dq_ref - dq)
+```
+
+The frozen first policy is the BeyondMimic-style motion tracker.  It receives
+the current named reference frame plus robot state and emits a joint-position
+offset around the reference.  The end-to-end hierarchical variant trains a
+whole-body joint-target correction and two continuous contact-intention actions.
+It observes motion state and MPC targets; its contact actions condition the MPC
+plan and are supervised by the simulator sensor, rather than by a separate
+history-based contact-prediction network.
+
+The intended two-stage training order is: train
+`Mjlab-MotionTracker-Themis` on the motion rewards, export it to TorchScript,
+then freeze it through `tracker_policy_path` while training
+`Mjlab-HybridMimic-MPC-Residual-Themis`. This keeps policy-one action
+generation separate from policy-two dynamics correction.
+
+`Mjlab-Hierarchical-HybridMimic-MPC-Themis` is the end-to-end training-time
+variant for reference clips that cannot be exactly realized. Its one PPO
+rollout has a low-level whole-body joint action `Δq` and two continuous
+foot-contact-intention actions every policy step, plus a 16-D high-level
+action held for five policy steps. The
+held action only changes bounded CD-MPC parameters: contact-clock rate, duty
+offset, touchdown mean/std and centroidal momentum residual. The detached MPC
+then provides CoM, momentum, contact-force and contact-moment landmarks; the
+same PPO return combines these with the motion mimic rewards. It does not
+differentiate through MPC or MuJoCo, and touchdown variance is metadata for a
+future chance-constrained extension rather than per-solve random sampling.
+
+`Mjlab-MPC-RL-Mimic-Contact-Themis` is the Phase-1 teacher task. It has
+`Δq` plus a full-horizon `2 × H` contact-plan residual action, with no 16-D
+slow parameter action. Its actor sees only one upcoming q/dq reference frame;
+the MPC internally uses the complete motion-derived horizon. Its MPC uses
+the motion-derived
+\(x^{ref}=[c^{ref},l^{ref},k^{ref}]\), zero wrench reference, state-tracking
+weights `Q_c/Q_l/Q_k`, and wrench magnitude/slew weights
+`R_f_foot/R_tau_foot/R_delta`. Its PPO reward is the sum of motion-mimic,
+MPC-landmark (CoM, momentum, GRF, contact consistency), and regularization/
+safety terms. It does not use a phase clock: supply optional `[T, 2]` contact
+labels through `reference_contact_key`, or use its flat-ground height/velocity
+fallback to construct the reference horizon contact sequence.
+
+`Mjlab-MPC-RL-Mimic-Student-Themis` is the Phase-2 causal deployment task.
+It removes MPC and the contact-plan action, retaining only the 29-D joint
+target correction. `docs/two_stage_mpc_rl_mimic_contact.md` specifies the
+DAgger teacher-query and loss interface.
+
+The motion loader accepts BeyondMimic NPZ files containing `joint_names`,
+`body_names`, `joint_pos`, `joint_vel`, and world-frame body trajectories. It
+strictly validates names. The current checked-in simulator entity is THEMIS,
+whereas BeyondMimic's supplied clips are G1 clips, so a G1 clip cannot be used
+with the registered THEMIS task directly: first retarget it to the THEMIS
+names, or replace the entity with a G1 MJCF/actuator configuration. This is a
+safety check, not a format conversion.
+
+To run the task, set `env.commands.motion.motion_file` to the retargeted NPZ
+and optionally set `env.actions.hybrid_mimic.tracker_policy_path` to a
+TorchScript export of the frozen tracker.  The hierarchical task instead uses
+the raw reference plus its jointly trained joint-target action.  Its two
+continuous foot-contact actions are contact intentions: they modulate the
+frozen-before-solve MPC contact activation and are rewarded against the actual
+MuJoCo foot-contact sensor.  No standalone GRU or offline contact dataset is
+used. For exact whole-body centroidal quantities, pass every reference body
+through `centroidal_body_names`; the default tracker-body subset is only a
+compatibility fallback.
 
 ## Setup
 
@@ -122,6 +198,36 @@ MPC parameters are set at two levels:
   regularization `R_f_foot` / `R_tau_foot` / `R_delta`, friction `mu_foot` /
   `fz_max_foot` and foot geometry, and solver settings `admm_max_iter`,
   `pimpc_rho`, `pimpc_accel`, `pimpc_precondition`.
+
+### MPC-parameter adaptor and control landmarks
+
+`MPCParameterNet` (`src/themis_training/mpc_parameter_net.py`) is an optional
+low-rate GRU adaptor for MPC parameters, not contact prediction. A TorchScript export receives
+`[batch, history, 29]` state/reference features and outputs 16 raw values.  The
+runtime bounds these into contact-clock rate, duty-factor offset, two XY
+touchdown residual means and standard deviations, plus linear/angular momentum
+reference residuals.  In the mimic task the retargeted reference touchdown is
+the Gaussian mean; the adaptor outputs its bounded XY residual. Pass its export through
+`themis_hybrid_mimic_env_cfg(..., mpc_parameter_network_path=...)`.
+
+The numerical CD-MPC `dt` is deliberately fixed.  The network changes contact
+timing through the phase clock before the QP is assembled, so contact position,
+timing, and the CoM linearization are constants during each solve.  Gaussian
+touchdown candidates are available for offline/low-rate robust candidate
+selection; independent sampling inside every QP is intentionally not enabled.
+
+Each MPC solve stores its full contact-wrench sequence
+`[f_L, tau_L, f_R, tau_R]`, and the command time-interpolates that sequence for
+the critic landmarks and force-tracking reward.  The default contact sensor can
+supervise **forces** only.  A contact-moment reward needs a calibrated six-axis
+force/torque sensor (or valid CoP/pressure reconstruction); moment landmarks
+are therefore critic references by default.  In the MPC-guided imitation task,
+these wrench trajectories remain landmarks and are not mapped to actuator
+torques through a Jacobian.
+
+The stochastic-contact extension path, conditional stability result, and joint
+mimic/MPC-RL training design are in
+[`docs/stochastic_contact_mpc_and_joint_mimic.md`](docs/stochastic_contact_mpc_and_joint_mimic.md).
 
 ## Acknowledgements
 
