@@ -46,3 +46,6 @@ Thumbs.db
 *.ipynb
 
 assets/ref_motion/
+
+src/themis_training/g1/xmls/
+src/themis_training/jingchu01/xmls/

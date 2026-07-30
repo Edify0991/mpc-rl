@@ -41,6 +41,11 @@ proposed batch MPC solver **$\pi^n$ MPC** in JAX and PyTorch.
 | `Mjlab-MPC-RL-Mimic-Student-Themis` | Causal 29-D joint-target student for Phase-2 DAgger/PPO training. |
 | `Mjlab-MotionTracker-Themis` | Stage-one BeyondMimic-style motion tracker. |
 
+Unitree G1-29DOF task IDs and the required G1 reference-motion convention are
+documented in [`docs/g1_29dof_training.md`](docs/g1_29dof_training.md).
+Jingchu01 28-DOF training is documented in
+[`docs/jingchu01_28dof_training.md`](docs/jingchu01_28dof_training.md).
+
 ## Hybrid motion imitation
 
 `Mjlab-HybridMimic-MPC-Residual-Themis` uses reference PD tracking:

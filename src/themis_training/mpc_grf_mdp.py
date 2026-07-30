@@ -56,10 +56,20 @@ class LocoMPCCommandCfg(CommandTermCfg):
             site_names=("left_foot", "right_foot"),
         )
     )
+    # Canonical contact order is left then right.  The default preserves the
+    # existing THEMIS/G1 MJCF names; other robots may use different site names
+    # without changing the QP's two-contact ordering.
+    left_foot_site_name: str = "left_foot"
+    right_foot_site_name: str = "right_foot"
 
     mpc_dt: float = 0.07
     mpc_horizon: int = 10
     mass: float = 37.0
+    # Body-frame composite inertia used to turn the measured root angular
+    # velocity into the initial angular-momentum estimate.  Keep the THEMIS
+    # value as the default for backward compatibility; robot-specific tasks
+    # must override it rather than reusing a mismatched model.
+    inertia_body: tuple[tuple[float, float, float], ...] = _I_BODY
     hip_width: float = 0.1
 
     gait_period: float = 0.9
@@ -136,15 +146,22 @@ class LocoMPCCommand(CommandTerm):
         _, _resolved_names = self._robot.find_sites(
             cfg.asset_cfg.site_names, preserve_order=False
         )
-        self._lf_site_local_idx = next(
-            i for i, n in enumerate(_resolved_names) if n == "left_foot"
-        )
-        self._rf_site_local_idx = next(
-            i for i, n in enumerate(_resolved_names) if n == "right_foot"
-        )
+        try:
+            self._lf_site_local_idx = next(
+                i for i, n in enumerate(_resolved_names) if n == cfg.left_foot_site_name
+            )
+            self._rf_site_local_idx = next(
+                i for i, n in enumerate(_resolved_names) if n == cfg.right_foot_site_name
+            )
+        except StopIteration as exc:
+            raise ValueError(
+                "MPC foot sites are not present in asset_cfg.site_names: "
+                f"left={cfg.left_foot_site_name!r}, right={cfg.right_foot_site_name!r}, "
+                f"resolved={_resolved_names}"
+            ) from exc
 
         self._I_approx = torch.tensor(
-            _I_BODY, device=env.device, dtype=torch.float32
+            cfg.inertia_body, device=env.device, dtype=torch.float32
         )
 
         mpc_cfg = MPCConfig(
