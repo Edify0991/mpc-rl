@@ -112,7 +112,7 @@ def _reconstruct_bodies(
   """Replay state records through MuJoCo and collect selected body kinematics."""
   joint_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name) for name in joint_names]
   if any(joint_id < 0 for joint_id in joint_ids):
-    missing = [name for name, joint_id in zip(joint_names, joint_ids) if joint_id < 0]
+    missing = [name for name, joint_id in zip(joint_names, joint_ids, strict=True) if joint_id < 0]
     raise ValueError(f"MCAP/reference joint names are absent from XML: {missing}")
   root_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "root_freejoint")
   if root_joint_id < 0 or model.jnt_type[root_joint_id] != mujoco.mjtJoint.mjJNT_FREE:
@@ -245,7 +245,7 @@ def main() -> None:
   model_body_names = [body_map.get(name, name) for name in reference_body_names]
   model_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in model_body_names]
   if any(body_id < 0 for body_id in model_ids):
-    missing = [name for name, body_id in zip(model_body_names, model_ids) if body_id < 0]
+    missing = [name for name, body_id in zip(model_body_names, model_ids, strict=True) if body_id < 0]
     raise ValueError(f"Reference bodies absent from XML: {missing}")
 
   contact_specs = [_parse_contact(value) for value in args.contact]
@@ -279,6 +279,9 @@ def main() -> None:
     body_inertial_quat_b=torch.as_tensor(model.body_iquat[model_ids], dtype=torch.float32),
     contact_body_indices=contact_indices,
     contact_point_offset_b=contact_offsets,
+    # _reconstruct_bodies obtains translational velocity from a Jacobian at
+    # data.xpos (the link origin), unlike BeyondMimic/MJLab NPZ capture.
+    body_linear_velocity_point="link_origin",
   )
   raw = {
     "com_pos_w": centroidal.com_pos_w.numpy(),

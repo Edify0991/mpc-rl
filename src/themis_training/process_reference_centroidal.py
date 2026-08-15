@@ -123,6 +123,9 @@ def main() -> None:
   fps = float(np.asarray(data["fps"]).reshape(-1)[0])
   if fps <= 0.0:
     raise ValueError(f"Reference fps must be positive, got {fps}")
+  velocity_point = str(np.asarray(data.get("body_linear_velocity_point", "inertial_com")).reshape(-1)[0])
+  if velocity_point not in {"inertial_com", "link_origin"}:
+    raise ValueError(f"Unsupported body_linear_velocity_point={velocity_point!r}")
 
   reference_names = [str(name) for name in data["body_names"].tolist()]
   if len(set(reference_names)) != len(reference_names):
@@ -134,7 +137,7 @@ def main() -> None:
   ]
   resolved_model_names = [body_map.get(name, name) for name in reference_names]
   unresolved = [
-    reference_name for reference_name, model_name in zip(reference_names, resolved_model_names)
+    reference_name for reference_name, model_name in zip(reference_names, resolved_model_names, strict=True)
     if model_name not in model_names
   ]
   if unresolved:
@@ -166,6 +169,7 @@ def main() -> None:
     body_inertial_quat_b=torch.as_tensor(model.body_iquat[model_ids], dtype=torch.float32),
     contact_body_indices=contact_indices,
     contact_point_offset_b=contact_offsets,
+    body_linear_velocity_point=velocity_point,
   )
   contact_pos_w = trajectory.contact_pos_w.numpy()
   if len(contact_specs):
@@ -200,6 +204,7 @@ def main() -> None:
     source_motion=np.asarray(str(args.motion.resolve())),
     source_xml=np.asarray(str(args.xml.resolve())),
     source_urdf=np.asarray("" if args.urdf is None else str(args.urdf.resolve())),
+    source_body_linear_velocity_point=np.asarray(velocity_point),
     height_threshold=np.asarray(args.height_threshold, dtype=np.float32),
     speed_threshold=np.asarray(args.speed_threshold, dtype=np.float32),
     min_stance_frames=np.asarray(args.min_stance_frames, dtype=np.int32),
@@ -214,7 +219,7 @@ def main() -> None:
     "fps": fps,
     "duration_s": float((trajectory.com_pos_w.shape[0] - 1) / fps),
     "total_mass_kg": float(model.body_mass[model_ids].sum()),
-    "body_map": {name: model_name for name, model_name in zip(reference_names, resolved_model_names)},
+    "body_map": {name: model_name for name, model_name in zip(reference_names, resolved_model_names, strict=True)},
     "contacts": [
       {"label": label, "reference_body": body, "offset_b_m": list(offset)}
       for label, body, offset in contact_specs

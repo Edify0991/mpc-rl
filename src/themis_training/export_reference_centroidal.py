@@ -27,6 +27,9 @@ def main() -> None:
   if missing:
     raise ValueError(f"Reference is missing {sorted(missing)}")
   motion_names = [str(name) for name in data["body_names"].tolist()]
+  velocity_point = str(np.asarray(data.get("body_linear_velocity_point", "inertial_com")).reshape(-1)[0])
+  if velocity_point not in {"inertial_com", "link_origin"}:
+    raise ValueError(f"Unsupported body_linear_velocity_point={velocity_point!r}")
   selected_names = args.body or motion_names
   index = {name: i for i, name in enumerate(motion_names)}
   missing_motion = [name for name in selected_names if name not in index]
@@ -42,7 +45,7 @@ def main() -> None:
     model_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in selected_names]
   except Exception as exc:
     raise ValueError("Failed resolving reference names in MuJoCo model") from exc
-  unresolved = [name for name, body_id in zip(selected_names, model_ids) if body_id < 0]
+  unresolved = [name for name, body_id in zip(selected_names, model_ids, strict=True) if body_id < 0]
   if unresolved:
     raise ValueError(f"Reference/model body name mismatch: {unresolved}")
   motion_ids = [index[name] for name in selected_names]
@@ -58,6 +61,7 @@ def main() -> None:
     body_inertia_diag=torch.tensor(model.body_inertia[model_ids], dtype=torch.float32, device=device),
     body_inertial_quat_b=torch.tensor(model.body_iquat[model_ids], dtype=torch.float32, device=device),
     contact_body_indices=contact_ids,
+    body_linear_velocity_point=velocity_point,
   )
   args.output.parent.mkdir(parents=True, exist_ok=True)
   np.savez_compressed(
@@ -70,6 +74,7 @@ def main() -> None:
     contact_pos_rel_com_w=trajectory.contact_pos_rel_com_w.numpy(),
     centroidal_body_names=np.asarray(selected_names),
     contact_body_names=np.asarray(args.contact_body),
+    source_body_linear_velocity_point=np.asarray(velocity_point),
   )
 
 

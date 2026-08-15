@@ -69,6 +69,18 @@ G1_JOINT_NAMES: tuple[str, ...] = (
   "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
 )
 
+# Full inertial body set, distinct from the sparse pose-tracking body set in
+# g1_env_cfgs.  Use it for mass-consistent reference centroidal quantities.
+G1_CENTROIDAL_BODY_NAMES: tuple[str, ...] = (
+  "pelvis", "left_hip_pitch_link", "left_hip_roll_link", "left_hip_yaw_link", "left_knee_link",
+  "left_ankle_pitch_link", "left_ankle_roll_link", "right_hip_pitch_link", "right_hip_roll_link",
+  "right_hip_yaw_link", "right_knee_link", "right_ankle_pitch_link", "right_ankle_roll_link",
+  "waist_yaw_link", "waist_roll_link", "torso_link", "left_shoulder_pitch_link", "left_shoulder_roll_link",
+  "left_shoulder_yaw_link", "left_elbow_link", "left_wrist_roll_link", "left_wrist_pitch_link",
+  "left_wrist_yaw_link", "right_shoulder_pitch_link", "right_shoulder_roll_link", "right_shoulder_yaw_link",
+  "right_elbow_link", "right_wrist_roll_link", "right_wrist_pitch_link", "right_wrist_yaw_link",
+)
+
 
 def _joint_map(motor: MotorSpec, *patterns: str) -> dict[str, float]:
   return {pattern: motor.stiffness for pattern in patterns}

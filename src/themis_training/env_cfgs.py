@@ -9,9 +9,12 @@ from themis_training.themis.themis_constants import (
   JOINT_NAMES_EXPR,
   STIFFNESS,
   DAMPING,
+  THEMIS_TOTAL_MASS,
+  THEMIS_CENTROIDAL_BODY_NAMES,
 )
 from themis_training import phase_mdp
 from themis_training import mpc_grf_mdp
+from themis_training import mpc_grf_mimic_mdp
 from themis_training import mimic_mdp
 from themis_training import hybrid_mimic
 from themis_training.mpc_grf_mdp import LocoMPCCommandCfg, LocoManipMPCCommandCfg
@@ -747,7 +750,7 @@ def _apply_mpc_grf_features(
     asset_cfg=SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
     mpc_dt=0.07,            # 50 × 0.07 s = 3.5 s ≈ 5 full gait cycle lookahead
     mpc_horizon=10,
-    mass=37.0,
+    mass=THEMIS_TOTAL_MASS,
     hip_width=0.15,          # ±0.1 m body-frame y offset for predicted touchdowns
     gait_period=_GAIT_PERIOD,  # must match _GAIT_PERIOD used by the phase clock
     duty_factor=0.5,
@@ -1048,6 +1051,9 @@ def themis_hybrid_mimic_env_cfg(
   """
   cfg = themis_mpc_grf_v2_flat_env_cfg(play=play)
   cfg.scene.entities = {"robot": get_themis_effort_robot_cfg()}
+  # Preserve the paper baseline command implementation in mpc_grf_mdp.py.
+  # Only this mimic task opts into the articulated-centroidal extension.
+  cfg.commands["loco_mpc"] = mpc_grf_mimic_mdp.as_mimic_loco_mpc_cfg(cfg.commands["loco_mpc"])
 
   # Agent 1: BeyondMimic-style reference stream and (optionally) frozen policy.
   # Agent 2: normal rsl_rl PPO action.  The hierarchical variant below makes
@@ -1062,13 +1068,14 @@ def themis_hybrid_mimic_env_cfg(
     joint_names=tuple(JOINT_NAMES_EXPR),
     body_names=body_names,
     anchor_body_name="BASE_LINK",
-    centroidal_body_names=centroidal_body_names or body_names,
+    centroidal_body_names=centroidal_body_names or THEMIS_CENTROIDAL_BODY_NAMES,
+    reference_frame_alignment="initial_anchor",
     contact_body_names=("FOOT_L", "FOOT_R"),
     random_start=not play,
     debug_vis=False,
   )
   loco_mpc = cfg.commands["loco_mpc"]
-  assert isinstance(loco_mpc, LocoMPCCommandCfg)
+  assert isinstance(loco_mpc, mpc_grf_mimic_mdp.MimicLocoMPCCommandCfg)
   loco_mpc.motion_command_name = "motion"
   loco_mpc.parameter_network_path = mpc_parameter_network_path
 
@@ -1122,6 +1129,19 @@ def themis_hybrid_mimic_env_cfg(
   cfg.rewards["residual_action"] = RewardTermCfg(
     func=hybrid_mimic.residual_action_l2, weight=-0.01, params={"action_name": "hybrid_mimic"}
   )
+  # All mimic variants, including the slow-parameter hierarchical variant,
+  # use the full articulated state rather than root-inertia landmark terms.
+  for name in ("mpc_com_tracking", "mpc_com_vel_tracking", "mpc_ang_mom", "mpc_ang_vel_tracking"):
+    if name in cfg.rewards:
+      cfg.rewards[name].weight = 0.0
+  cfg.rewards["mpc_exact_centroidal_landmark"] = RewardTermCfg(
+    func=mpc_grf_mimic_mdp.MpcExactCentroidalLandmarkTracking,
+    weight=1.0,
+    params={
+      "command_name": "loco_mpc", "w_com": 4.0, "w_com_vel": 1.0,
+      "w_linear_momentum": 0.02, "w_angular_momentum": 0.10,
+    },
+  )
   return cfg
 
 
@@ -1165,7 +1185,7 @@ def themis_hierarchical_hybrid_mimic_env_cfg(
   action.high_level_decimation = 5
 
   loco_mpc = cfg.commands["loco_mpc"]
-  assert isinstance(loco_mpc, LocoMPCCommandCfg)
+  assert isinstance(loco_mpc, mpc_grf_mimic_mdp.MimicLocoMPCCommandCfg)
   loco_mpc.parameter_network_path = None
   loco_mpc.use_hierarchical_parameters = True
   loco_mpc.use_policy_contact_state = True
@@ -1177,20 +1197,20 @@ def themis_hierarchical_hybrid_mimic_env_cfg(
   # landmarks/parameters only; no action is computed by the MPC itself.
   for group in ("actor", "critic"):
     cfg.observations[group].terms["mpc_com_ref"] = ObservationTermCfg(
-      func=mpc_grf_mdp.mpc_com_ref, params={"command_name": "loco_mpc"}
+      func=mpc_grf_mimic_mdp.mpc_com_ref, params={"command_name": "loco_mpc"}
     )
     cfg.observations[group].terms["mpc_k_ref"] = ObservationTermCfg(
-      func=mpc_grf_mdp.mpc_ang_mom_ref, params={"command_name": "loco_mpc"}
+      func=mpc_grf_mimic_mdp.mpc_ang_mom_ref, params={"command_name": "loco_mpc"}
     )
     cfg.observations[group].terms["mpc_contact_force_ref"] = ObservationTermCfg(
-      func=mpc_grf_mdp.mpc_contact_force_ref, params={"command_name": "loco_mpc"}
+      func=mpc_grf_mimic_mdp.mpc_contact_force_ref, params={"command_name": "loco_mpc"}
     )
     cfg.observations[group].terms["mpc_hierarchical_parameter_state"] = ObservationTermCfg(
-      func=mpc_grf_mdp.mpc_hierarchical_parameter_state,
+      func=mpc_grf_mimic_mdp.mpc_hierarchical_parameter_state,
       params={"command_name": "loco_mpc"},
     )
     cfg.observations[group].terms["policy_contact_state"] = ObservationTermCfg(
-      func=mpc_grf_mdp.policy_contact_state,
+      func=mpc_grf_mimic_mdp.policy_contact_state,
       params={"action_name": "hybrid_mimic"},
     )
 
@@ -1200,7 +1220,7 @@ def themis_hierarchical_hybrid_mimic_env_cfg(
   # force from ``themis_hybrid_mimic_env_cfg``.
   cfg.rewards["mpc_grf_tracking"].weight = 0.10
   cfg.rewards["hierarchical_mpc_parameter"] = RewardTermCfg(
-    func=mpc_grf_mdp.hierarchical_mpc_parameter_l2,
+    func=mpc_grf_mimic_mdp.hierarchical_mpc_parameter_l2,
     weight=-1.0e-3,
     params={"action_name": "hybrid_mimic"},
   )
@@ -1208,7 +1228,7 @@ def themis_hierarchical_hybrid_mimic_env_cfg(
   # explicitly learning contact activation for infeasible reference segments.
   cfg.rewards["foot_gait"].weight = 0.0
   cfg.rewards["policy_contact_state"] = RewardTermCfg(
-    func=mpc_grf_mdp.policy_contact_state_tracking,
+    func=mpc_grf_mimic_mdp.policy_contact_state_tracking,
     weight=0.5,
     params={
       "action_name": "hybrid_mimic",
@@ -1273,7 +1293,7 @@ def themis_mpc_rl_mimic_contact_env_cfg(
   action.hierarchical_mpc_parameters = False
 
   loco_mpc = cfg.commands["loco_mpc"]
-  assert isinstance(loco_mpc, LocoMPCCommandCfg)
+  assert isinstance(loco_mpc, mpc_grf_mimic_mdp.MimicLocoMPCCommandCfg)
   loco_mpc.parameter_network_path = None
   loco_mpc.use_hierarchical_parameters = False
   loco_mpc.use_policy_contact_state = False
@@ -1298,20 +1318,20 @@ def themis_mpc_rl_mimic_contact_env_cfg(
   )
   for group in ("critic",):
     cfg.observations[group].terms["mpc_com_ref"] = ObservationTermCfg(
-      func=mpc_grf_mdp.mpc_com_ref, params={"command_name": "loco_mpc"}
+      func=mpc_grf_mimic_mdp.mpc_com_ref, params={"command_name": "loco_mpc"}
     )
     cfg.observations[group].terms["mpc_k_ref"] = ObservationTermCfg(
-      func=mpc_grf_mdp.mpc_ang_mom_ref, params={"command_name": "loco_mpc"}
+      func=mpc_grf_mimic_mdp.mpc_ang_mom_ref, params={"command_name": "loco_mpc"}
     )
     cfg.observations[group].terms["mpc_contact_force_ref"] = ObservationTermCfg(
-      func=mpc_grf_mdp.mpc_contact_force_ref, params={"command_name": "loco_mpc"}
+      func=mpc_grf_mimic_mdp.mpc_contact_force_ref, params={"command_name": "loco_mpc"}
     )
     cfg.observations[group].terms["mpc_contact_plan_ref"] = ObservationTermCfg(
-      func=mpc_grf_mdp.mpc_contact_plan_ref,
+      func=mpc_grf_mimic_mdp.mpc_contact_plan_ref,
       params={"command_name": "loco_mpc"},
     )
     cfg.observations[group].terms["mpc_contact_plan_valid"] = ObservationTermCfg(
-      func=mpc_grf_mdp.mpc_contact_plan_valid,
+      func=mpc_grf_mimic_mdp.mpc_contact_plan_valid,
       params={"command_name": "loco_mpc"},
     )
 
@@ -1325,13 +1345,29 @@ def themis_mpc_rl_mimic_contact_env_cfg(
   # A phase-clock contact reward would conflict with the learned contact plan.
   cfg.rewards["foot_gait"].weight = 0.0
   cfg.rewards["mpc_foot_placement"].weight = 0.0
-  cfg.rewards["mpc_com_tracking"].weight = 1.0
-  cfg.rewards["mpc_com_vel_tracking"].weight = 1.0
-  cfg.rewards["mpc_ang_mom"].weight = 0.05
+  # Do not mix legacy root-based landmark rewards with the exact articulated
+  # centroidal reward below.  They stay registered by the generic locomotion
+  # configuration for backward compatibility, but are disabled in mimic.
+  cfg.rewards["mpc_com_tracking"].weight = 0.0
+  cfg.rewards["mpc_com_vel_tracking"].weight = 0.0
+  cfg.rewards["mpc_ang_mom"].weight = 0.0
   cfg.rewards["mpc_ang_vel_tracking"].weight = 0.0
+  cfg.rewards["mpc_exact_centroidal_landmark"] = RewardTermCfg(
+    func=mpc_grf_mimic_mdp.MpcExactCentroidalLandmarkTracking,
+    weight=1.0,
+    params={
+      "command_name": "loco_mpc",
+      "w_com": 4.0,
+      "w_com_vel": 1.0,
+      # l=m*c_dot: retain a modest direct momentum term while velocity
+      # remains the better-scaled translational tracking signal.
+      "w_linear_momentum": 0.02,
+      "w_angular_momentum": 0.10,
+    },
+  )
   cfg.rewards["mpc_grf_tracking"].weight = 0.05
   cfg.rewards["future_contact_plan"] = RewardTermCfg(
-    func=mpc_grf_mdp.FutureContactPlanTracking,
+    func=mpc_grf_mimic_mdp.FutureContactPlanTracking,
     weight=0.5,
     params={
       "command_name": "loco_mpc",
@@ -1797,7 +1833,7 @@ def themis_loco_manip_mpc_push_box_flat_env_cfg(play: bool = False) -> ManagerBa
     debug_vis=play,
     mpc_dt=0.07,
     mpc_horizon=10,          # 10 × 0.07 s = 0.7 s lookahead (~1 gait cycle)
-    mass=37.0,
+    mass=THEMIS_TOTAL_MASS,
     gait_period=_GAIT_PERIOD,
     run_every_n_steps=5,     # MPC runs at policy rate (50 Hz)
     # Hand geometry
