@@ -5,12 +5,12 @@ THEMIS 的关节名、足底碰撞几何、PD 参数、质量或近似转动惯�
 
 ## 新增文件与任务
 
-- `src/themis_training/g1/xmls/g1.xml` 及同目录 `assets/`：G1 29-DOF MJCF
+- `src/g1_training/g1/xmls/g1.xml` 及同目录 `assets/`：G1 29-DOF MJCF
   和网格资产。
-- `src/themis_training/g1/g1_constants.py`：29 关节顺序、Unitree 电机等效
+- `src/g1_training/constants.py`：29 关节顺序、Unitree 电机等效
   armature / PD、位置与 effort 两套 articulation、足底碰撞、初始姿态，以及
   质心 MPC 参数。
-- `src/themis_training/g1_env_cfgs.py`：G1 平地速度、motion tracker、第一阶段
+- `src/g1_training/env_cfgs.py`：G1 平地速度、原论文 MPC locomotion / loco-manipulation、motion tracker、第一阶段
   MPC-RL mimic-contact teacher、第二阶段 causal student 环境。
 
 已注册的 task id：
@@ -18,6 +18,8 @@ THEMIS 的关节名、足底碰撞几何、PD 参数、质量或近似转动惯�
 | Task | 用途 | 动作 |
 |---|---|---|
 | `Mjlab-Velocity-G1-29DOF` | 不依赖参考动作的 G1 速度基线 | 29D 位置目标 |
+| `Mjlab-MPC-Guided-Locomotion-G1-29DOF` | 原 THEMIS velocity-command CD-MPC 结构的 G1 端口 | 29D 位置目标 |
+| `Mjlab-MPC-Guided-Loco-manipulation-G1-29DOF` | 原 THEMIS 推箱 loco-manipulation 的 G1 端口 | 29D 位置目标 |
 | `Mjlab-MotionTracker-G1-29DOF` | BeyondMimic 风格 tracker | 29D 位置目标 |
 | `Mjlab-MPC-RL-Mimic-Contact-G1-29DOF` | 阶段一 teacher | 29D `q_des` residual + `2H` 接触计划 residual |
 | `Mjlab-Hierarchical-HybridMimic-MPC-G1-29DOF` | 阶段一的分层扩展 | 上述动作 + 慢尺度 16D MPC 参数 |

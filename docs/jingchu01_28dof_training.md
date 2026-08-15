@@ -2,7 +2,7 @@
 
 本仓库新增了与 THEMIS/G1 隔离的 Jingchu01 28-DOF 训练配置。资产来自
 `/home/user/wmd/jc01-model`，并复制到
-`src/themis_training/jingchu01/xmls/`，因此训练不依赖该工作区外的资产路径。
+`src/jingchu01_training/jingchu01/xmls/`，因此训练不依赖该工作区外的资产路径。
 
 ## 关节、根链接和接触约定
 
@@ -47,6 +47,8 @@ sim2real 实验前仍应使用 CRBA/MuJoCo 在线或分段标定替换。
 | Task ID | 动作空间 |
 |---|---|
 | `Mjlab-Velocity-Jingchu01-28DOF` | 28D position target |
+| `Mjlab-MPC-Guided-Locomotion-Jingchu01-28DOF` | 原 THEMIS velocity-command CD-MPC 的 JC01 端口 |
+| `Mjlab-MPC-Guided-Loco-manipulation-Jingchu01-28DOF` | 原 THEMIS 推箱 loco-manipulation 的 JC01 端口（wrist-origin 接触） |
 | `Mjlab-MotionTracker-Jingchu01-28DOF` | 28D position target |
 | `Mjlab-MPC-RL-Mimic-Contact-Jingchu01-28DOF` | 28D joint residual + `2H` contact-plan residual |
 | `Mjlab-Hierarchical-HybridMimic-MPC-Jingchu01-28DOF` | 上述动作 + 慢尺度 16D MPC 参数 |

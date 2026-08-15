@@ -22,8 +22,10 @@ from mjlab.tasks.velocity.mdp import SceneEntityCfg, UniformVelocityCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
-from . import hybrid_mimic, mimic_mdp, mpc_grf_mimic_mdp
-from .env_cfgs import _apply_mpc_grf_features, _apply_mpc_grf_v2_features
+from . import hybrid_mimic, mimic_mdp
+from g1_mpc import mimic_mdp as g1_mpc_mimic_mdp
+from g1_mpc import mpc_grf_mdp as g1_mpc_grf_mdp
+from training_common.mpc_locomotion_features import apply_mpc_grf_features, apply_mpc_grf_v2_features
 from .g1.g1_constants import (
   DAMPING,
   G1_ACTION_SCALE,
@@ -37,7 +39,12 @@ from .g1.g1_constants import (
 )
 from .hybrid_mimic import HybridMimicActionCfg
 from .mimic_mdp import MotionReferenceCommandCfg
-from .mpc_grf_mimic_mdp import MimicLocoMPCCommandCfg
+from g1_mpc.mimic_mdp import MimicLocoMPCCommandCfg
+from g1_mpc.mpc_grf_mdp import (
+  LocoMPCCommandCfg as G1LocoMPCCommandCfg,
+  LocoManipMPCCommandCfg as G1LocoManipMPCCommandCfg,
+)
+from .robot_loco_manipulation import add_push_box_loco_manipulation
 
 
 G1_FOOT_SITES = ("left_foot", "right_foot")
@@ -57,6 +64,55 @@ G1_TRACKING_BODY_NAMES = (
   "left_shoulder_roll_link", "left_elbow_link", "left_wrist_yaw_link",
   "right_shoulder_roll_link", "right_elbow_link", "right_wrist_yaw_link",
 )
+
+
+def g1_mpc_locomotion_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+  """Robot-local port of the paper's velocity-command MPC locomotion task."""
+  command = G1LocoMPCCommandCfg(
+    debug_vis=play, asset_cfg=SceneEntityCfg("robot", site_names=G1_FOOT_SITES),
+    left_foot_site_name="left_foot", right_foot_site_name="right_foot",
+    mpc_dt=0.07, mpc_horizon=10, mass=G1_TOTAL_MASS,
+    inertia_body=G1_CENTROIDAL_INERTIA_BODY, hip_width=0.15,
+    gait_period=0.9, duty_factor=0.5, vel_cmd_name="twist",
+    grf_sensor_name="feet_ground_contact", run_every_n_steps=5,
+  )
+  cfg = apply_mpc_grf_features(
+    g1_flat_env_cfg(play=play), command_cfg=command,
+    mpc_mdp=g1_mpc_grf_mdp, foot_sites=G1_FOOT_SITES,
+  )
+  return apply_mpc_grf_v2_features(cfg, mpc_mdp=g1_mpc_grf_mdp)
+
+
+def g1_mpc_loco_manipulation_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+  """G1 port of the original THEMIS MPC-guided push-box task.
+
+  G1 supplies physical palm sites and hand collision geoms, so the hand-force
+  part of the centroidal MPC has the same contact interpretation as THEMIS.
+  """
+  cfg = g1_mpc_locomotion_env_cfg(play=play)
+  command = G1LocoManipMPCCommandCfg(
+    debug_vis=play,
+    mpc_dt=0.07,
+    mpc_horizon=10,
+    mass=G1_TOTAL_MASS,
+    inertia_body=G1_CENTROIDAL_INERTIA_BODY,
+    gait_period=0.8,
+    run_every_n_steps=5,
+    asset_cfg=SceneEntityCfg("robot", site_names=G1_FOOT_SITES),
+    left_foot_site_name="left_foot",
+    right_foot_site_name="right_foot",
+    solver_type="jax_pimpc",
+  )
+  return add_push_box_loco_manipulation(
+    cfg,
+    command_cfg=command,
+    left_hand_site="left_palm",
+    right_hand_site="right_palm",
+    left_hand_geom="left_hand_collision",
+    right_hand_geom="right_hand_collision",
+    body_box_geoms=G1_FOOT_GEOMS,
+    mpc_mdp=g1_mpc_grf_mdp,
+  )
 
 
 def g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -235,7 +291,7 @@ def g1_mpc_rl_mimic_contact_env_cfg(
   centroidal_body_names: tuple[str, ...] | None = None,
 ) -> ManagerBasedRlEnvCfg:
   """G1 Phase-1 MPC-RL mimic teacher with future contact-plan action."""
-  cfg = _apply_mpc_grf_v2_features(_apply_mpc_grf_features(g1_flat_env_cfg(play=play), play=play))
+  cfg = g1_mpc_locomotion_env_cfg(play=play)
   cfg.scene.entities = {"robot": get_g1_effort_robot_cfg()}
   _add_motion_reference(cfg, motion_file, centroidal_body_names=centroidal_body_names)
   motion = cfg.commands["motion"]
@@ -243,7 +299,7 @@ def g1_mpc_rl_mimic_contact_env_cfg(
   motion.loop = False
   motion.random_start = not play
 
-  cfg.commands["loco_mpc"] = mpc_grf_mimic_mdp.as_mimic_loco_mpc_cfg(cfg.commands["loco_mpc"])
+  cfg.commands["loco_mpc"] = g1_mpc_mimic_mdp.as_mimic_loco_mpc_cfg(cfg.commands["loco_mpc"])
   loco_mpc = cfg.commands["loco_mpc"]
   assert isinstance(loco_mpc, MimicLocoMPCCommandCfg)
   loco_mpc.mass = G1_TOTAL_MASS
@@ -280,11 +336,11 @@ def g1_mpc_rl_mimic_contact_env_cfg(
     func=mimic_mdp.motion_reference_centroidal, params={"command_name": "motion"}
   )
   for name, func in (
-    ("mpc_com_ref", mpc_grf_mimic_mdp.mpc_com_ref),
-    ("mpc_k_ref", mpc_grf_mimic_mdp.mpc_ang_mom_ref),
-    ("mpc_contact_force_ref", mpc_grf_mimic_mdp.mpc_contact_force_ref),
-    ("mpc_contact_plan_ref", mpc_grf_mimic_mdp.mpc_contact_plan_ref),
-    ("mpc_contact_plan_valid", mpc_grf_mimic_mdp.mpc_contact_plan_valid),
+    ("mpc_com_ref", g1_mpc_mimic_mdp.mpc_com_ref),
+    ("mpc_k_ref", g1_mpc_mimic_mdp.mpc_ang_mom_ref),
+    ("mpc_contact_force_ref", g1_mpc_mimic_mdp.mpc_contact_force_ref),
+    ("mpc_contact_plan_ref", g1_mpc_mimic_mdp.mpc_contact_plan_ref),
+    ("mpc_contact_plan_valid", g1_mpc_mimic_mdp.mpc_contact_plan_valid),
   ):
     cfg.observations["critic"].terms[name] = ObservationTermCfg(
       func=func, params={"command_name": "loco_mpc"}
@@ -302,7 +358,7 @@ def g1_mpc_rl_mimic_contact_env_cfg(
   cfg.rewards["mpc_ang_mom"].weight = 0.0
   cfg.rewards["mpc_ang_vel_tracking"].weight = 0.0
   cfg.rewards["mpc_exact_centroidal_landmark"] = RewardTermCfg(
-    func=mpc_grf_mimic_mdp.MpcExactCentroidalLandmarkTracking,
+    func=g1_mpc_mimic_mdp.MpcExactCentroidalLandmarkTracking,
     weight=1.0,
     params={
       "command_name": "loco_mpc", "w_com": 4.0, "w_com_vel": 1.0,
@@ -317,7 +373,7 @@ def g1_mpc_rl_mimic_contact_env_cfg(
     func=hybrid_mimic.residual_action_l2, weight=-0.01, params={"action_name": "hybrid_mimic"}
   )
   cfg.rewards["future_contact_plan"] = RewardTermCfg(
-    func=mpc_grf_mimic_mdp.FutureContactPlanTracking,
+    func=g1_mpc_mimic_mdp.FutureContactPlanTracking,
     weight=0.5,
     params={
       "command_name": "loco_mpc", "sensor_name": "feet_ground_contact", "std": 0.25,
@@ -377,16 +433,16 @@ def g1_hierarchical_hybrid_mimic_env_cfg(
   loco_mpc.run_every_n_steps = action.high_level_decimation
   for group in ("actor", "critic"):
     for name, func in (
-      ("mpc_com_ref", mpc_grf_mimic_mdp.mpc_com_ref),
-      ("mpc_k_ref", mpc_grf_mimic_mdp.mpc_ang_mom_ref),
-      ("mpc_contact_force_ref", mpc_grf_mimic_mdp.mpc_contact_force_ref),
-      ("mpc_hierarchical_parameter_state", mpc_grf_mimic_mdp.mpc_hierarchical_parameter_state),
+      ("mpc_com_ref", g1_mpc_mimic_mdp.mpc_com_ref),
+      ("mpc_k_ref", g1_mpc_mimic_mdp.mpc_ang_mom_ref),
+      ("mpc_contact_force_ref", g1_mpc_mimic_mdp.mpc_contact_force_ref),
+      ("mpc_hierarchical_parameter_state", g1_mpc_mimic_mdp.mpc_hierarchical_parameter_state),
     ):
       cfg.observations[group].terms[name] = ObservationTermCfg(
         func=func, params={"command_name": "loco_mpc"}
       )
   cfg.rewards["hierarchical_mpc_parameter"] = RewardTermCfg(
-    func=mpc_grf_mimic_mdp.hierarchical_mpc_parameter_l2,
+    func=g1_mpc_mimic_mdp.hierarchical_mpc_parameter_l2,
     weight=-1.0e-3,
     params={"action_name": "hybrid_mimic"},
   )

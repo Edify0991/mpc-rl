@@ -33,7 +33,7 @@ dev = [
 
 [tool.ruff]
 indent-width = 2
-src = ["themis_training", "themis_mpc"]
+src = ["themis_training", "themis_mpc", "g1_mpc", "jingchu01_mpc", "g1_training", "jingchu01_training", "training_common", "mjlab_tools"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "B"]
@@ -43,13 +43,17 @@ select = ["E4", "E7", "E9", "F", "I", "B"]
 # MPC-guided tasks with the mjlab task registry.
 [project.entry-points."mjlab.tasks"]
 themis_training = "themis_training"
+g1_training = "g1_training"
+jingchu01_training = "jingchu01_training"
 
 [project.scripts]
 finetune = "themis_training.finetune:main"
-export-reference-centroidal = "themis_training.export_reference_centroidal:main"
-process-reference-centroidal = "themis_training.process_reference_centroidal:main"
-plot-reference-centroidal = "themis_training.plot_reference_centroidal:main"
-process-sim2sim-centroidal = "themis_training.process_sim2sim_centroidal:main"
-plot-sim2sim-centroidal-comparison = "themis_training.plot_sim2sim_centroidal_comparison:main"
-csv-to-npz-mjlab = "themis_training.csv_to_npz_mjlab:main"
-replay-npz-mjlab = "themis_training.replay_npz_mjlab:main"
+g1-finetune = "g1_training.finetune:main"
+jingchu01-finetune = "jingchu01_training.finetune:main"
+export-reference-centroidal = "mjlab_tools.export_reference_centroidal:main"
+process-reference-centroidal = "mjlab_tools.process_reference_centroidal:main"
+plot-reference-centroidal = "mjlab_tools.plot_reference_centroidal:main"
+process-sim2sim-centroidal = "mjlab_tools.process_sim2sim_centroidal:main"
+plot-sim2sim-centroidal-comparison = "mjlab_tools.plot_sim2sim_centroidal_comparison:main"
+csv-to-npz-mjlab = "mjlab_tools.csv_to_npz_mjlab:main"
+replay-npz-mjlab = "mjlab_tools.replay_npz_mjlab:main"

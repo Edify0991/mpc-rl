@@ -206,7 +206,8 @@ MPC parameters are set at two levels:
 
 ### MPC-parameter adaptor and control landmarks
 
-`MPCParameterNet` (`src/themis_training/mpc_parameter_net.py`) is an optional
+`MPCParameterNet` (`src/g1_training/mpc_parameter_net.py` and the mirrored
+`src/jingchu01_training/mpc_parameter_net.py`) is an optional
 low-rate GRU adaptor for MPC parameters, not contact prediction. A TorchScript export receives
 `[batch, history, 29]` state/reference features and outputs 16 raw values.  The
 runtime bounds these into contact-clock rate, duty-factor offset, two XY

@@ -8,7 +8,7 @@ offline centroidal processor.
 
 Example
 -------
-``python -m themis_training.csv_to_npz_mjlab input.pkl output.npz --robot jingchu01 --output-fps 50``
+``python -m mjlab_tools.csv_to_npz_mjlab input.pkl output.npz --robot jingchu01 --output-fps 50``
 """
 
 from __future__ import annotations

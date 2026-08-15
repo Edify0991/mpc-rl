@@ -9,7 +9,6 @@ match the named reference-motion contract.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 import re
 
 import mujoco
@@ -18,6 +17,7 @@ from mjlab.actuator import BuiltinMotorActuatorCfg, BuiltinPositionActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.utils.os import update_assets
 from mjlab.utils.spec_config import CollisionCfg
+from ..model import JINGCHU01_XML
 
 
 @dataclass(frozen=True)
@@ -99,8 +99,6 @@ for _joint in JINGCHU01_JOINT_NAMES:
     raise RuntimeError(f"No Jingchu01 motor assignment for {_joint}")
 
 
-_HERE = Path(__file__).parent
-JINGCHU01_XML: Path = _HERE / "xmls" / "jingchu01.xml"
 assert JINGCHU01_XML.exists(), f"Missing Jingchu01 MJCF: {JINGCHU01_XML}"
 
 

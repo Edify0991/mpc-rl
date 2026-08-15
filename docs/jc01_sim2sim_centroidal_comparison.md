@@ -80,7 +80,7 @@ MCAP 有 15,989 帧、79.9798 s（约 199.90 Hz），reference 有 79.96 s 但�
 ```bash
 MPLCONFIGDIR=/tmp/matplotlib PYTHONPATH=src \
   /home/user/anaconda3/envs/wmd_ampmjlab/bin/python \
-  -m themis_training.process_sim2sim_centroidal \
+  -m mjlab_tools.process_sim2sim_centroidal \
   assets/ref_motion/processed/Jul21_14-14-00_beyondmimic_jc01_dance_wo_state_estimation_policy_running_frames.mcap \
   assets/ref_motion/smpl_jc01_taichi1.npz \
   /home/user/wmd/jingchu01/JC01-7DOF-URDF/JC01-URDF-18所/scene_jingchu01.xml \
@@ -92,7 +92,7 @@ MPLCONFIGDIR=/tmp/matplotlib PYTHONPATH=src \
 
 MPLCONFIGDIR=/tmp/matplotlib PYTHONPATH=src \
   /home/user/anaconda3/envs/wmd_ampmjlab/bin/python \
-  -m themis_training.plot_sim2sim_centroidal_comparison \
+  -m mjlab_tools.plot_sim2sim_centroidal_comparison \
   assets/ref_motion/processed/smpl_jc01_taichi1_centroidal.npz \
   assets/ref_motion/processed/jc01_taichi1_beyondmimic_sim2sim_centroidal.npz \
   assets/ref_motion/processed/jc01_taichi1_beyondmimic_comparison_figures \

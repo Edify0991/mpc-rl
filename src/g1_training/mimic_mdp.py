@@ -19,7 +19,7 @@ from mjlab.managers.command_manager import CommandTerm, CommandTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.utils.lab_api.math import quat_apply, quat_inv, quat_mul, yaw_quat
 
-from .reference_centroidal import (
+from training_common.reference_centroidal import (
   ReferenceCentroidalTrajectory,
   compute_reference_centroidal,
   prealign_reference_kinematics_to_initial_anchor,

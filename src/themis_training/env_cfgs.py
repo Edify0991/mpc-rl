@@ -12,15 +12,10 @@ from themis_training.themis.themis_constants import (
   THEMIS_TOTAL_MASS,
   THEMIS_CENTROIDAL_BODY_NAMES,
 )
-from themis_training import phase_mdp
+from . import phase_mdp
 from themis_training import mpc_grf_mdp
-from themis_training import mpc_grf_mimic_mdp
-from themis_training import mimic_mdp
-from themis_training import hybrid_mimic
 from themis_training.mpc_grf_mdp import LocoMPCCommandCfg, LocoManipMPCCommandCfg
-from themis_training.mimic_mdp import MotionReferenceCommandCfg
-from themis_training.hybrid_mimic import HybridMimicActionCfg
-from themis_training import push_box_mdp
+from . import push_box_mdp
 from mjlab.entity import EntityCfg
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
@@ -46,6 +41,11 @@ from mjlab import terrains as terrain_gen
 from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
+
+# Kept only so the retired THEMIS mimic factory bodies remain importable for
+# old external callers. Every such factory raises before this sentinel is read;
+# active robot-specific mimic MPC lives in g1_mpc/ and jingchu01_mpc/.
+mpc_grf_mimic_mdp = None
 def _feet_too_near(
   env: ManagerBasedRlEnv,
   min_distance: float,
@@ -1049,6 +1049,11 @@ def themis_hybrid_mimic_env_cfg(
   same config becomes a G1 task after replacing ``scene.entities['robot']``
   and the names below by the G1 MJCF/articulation mapping.
   """
+  raise RuntimeError(
+    "THEMIS MPC-mimic tasks were retired during the robot-specific MPC split. "
+    "Use the G1 or Jingchu01 MPC-RL mimic task instead; THEMIS retains only "
+    "the paper-baseline MPC and the standalone MotionTracker task."
+  )
   cfg = themis_mpc_grf_v2_flat_env_cfg(play=play)
   cfg.scene.entities = {"robot": get_themis_effort_robot_cfg()}
   # Preserve the paper baseline command implementation in mpc_grf_mdp.py.
@@ -1447,6 +1452,10 @@ def themis_motion_tracker_env_cfg(
   It uses the original position-actuator action space; the hybrid task alone
   switches to effort motors so it can apply the reference PD law explicitly.
   """
+  raise RuntimeError(
+    "THEMIS motion imitation is intentionally not registered. Use the G1 or "
+    "Jingchu01 motion-tracker task, which owns its local mimic_mdp."
+  )
   cfg = themis_phase_flat_env_cfg(play=play)
   body_names = (
     "BASE_LINK", "FEMUR_L", "TIBIA_L", "FOOT_L", "FEMUR_R", "TIBIA_R", "FOOT_R",

@@ -20,7 +20,7 @@ import torch
 
 from .mcap_policy_frames import iter_policy_running_frames
 from .process_reference_centroidal import _parse_body_map, _parse_contact
-from .reference_centroidal import compute_reference_centroidal
+from training_common.reference_centroidal import compute_reference_centroidal
 
 
 def _xyzw_to_wxyz(quat_xyzw: np.ndarray) -> np.ndarray:

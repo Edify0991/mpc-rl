@@ -1,6 +1,6 @@
 # BeyondMimic 重定向动作到 MJLab reference NPZ
 
-`src/themis_training/csv_to_npz_mjlab.py` 是 BeyondMimic `csv_to_npz.py` 在本项目中的 **MJLab**
+`src/mjlab_tools/csv_to_npz_mjlab.py` 是 BeyondMimic `csv_to_npz.py` 在本项目中的 **MJLab**
 版本。它保留输入格式、四元数、插值和有限差分语义；随后像 BeyondMimic 一样，将每帧状态写入运行时的
 articulation、执行无积分的 forward、从 articulation data 读取状态，再保存 NPZ。因此生成的 NPZ 可直接作为
 `MotionReferenceCommandCfg.motion_file` 使用。
@@ -43,7 +43,7 @@ v_{C,j}^W=\texttt{body\_lin\_vel\_w}_j.
 \(\omega\times Rd\)。后者据此计算
 
 参考 \(c,\dot c,l,k_G\)。因此请在生成 NPZ 后按需运行现有的
-`python -m themis_training.process_reference_centroidal`，或让 `MotionReferenceCommand` 在训练初始化时
+`python -m mjlab_tools.process_reference_centroidal`，或让 `MotionReferenceCommand` 在训练初始化时
 根据相同模型参数自动计算。接触计划可以由该 processor 输出 `contact_state`，也可由
 `MotionReferenceCommand` 的运动学高度/速度规则在线加载为固定 reference schedule。
 
@@ -56,7 +56,7 @@ CPU 诊断/裁剪，它用 Jacobian 在 link origin 计算线速度，不能与�
 在仓库根目录、并使用安装了 `mujoco`、`mjlab`、`torch` 且可用 CUDA/MJWarp 的训练环境执行：
 
 ```bash
-python -m themis_training.csv_to_npz_mjlab \
+python -m mjlab_tools.csv_to_npz_mjlab \
   /path/to/retargeted_motion.pkl \
   assets/ref_motion/processed/jingchu01_motion.npz \
   --robot jingchu01 --output-fps 50 --device cuda:0 --sim-dt 0.02
@@ -65,7 +65,7 @@ python -m themis_training.csv_to_npz_mjlab \
 CSV 示例：
 
 ```bash
-python -m themis_training.csv_to_npz_mjlab \
+python -m mjlab_tools.csv_to_npz_mjlab \
   /path/to/retargeted.csv assets/ref_motion/processed/g1_motion.npz \
   --robot g1 --input-format csv --input-fps 30 --output-fps 50 \
   --frame-range 1 900
@@ -77,7 +77,7 @@ python -m themis_training.csv_to_npz_mjlab \
 ## MJLab/MuJoCo 回放与裁剪
 
 ```bash
-python -m themis_training.replay_npz_mjlab \
+python -m mjlab_tools.replay_npz_mjlab \
   assets/ref_motion/processed/jingchu01_motion.npz --robot jingchu01 --loop
 ```
 
@@ -86,7 +86,7 @@ display 时请只使用转换/裁剪命令。裁剪会重新计算 root/joint/bo
 端点速度：
 
 ```bash
-python -m themis_training.replay_npz_mjlab \
+python -m mjlab_tools.replay_npz_mjlab \
   assets/ref_motion/processed/jingchu01_motion.npz --robot jingchu01 \
   --trim-frame-range 120 520 \
   --trim-output assets/ref_motion/processed/jingchu01_motion_segment.npz

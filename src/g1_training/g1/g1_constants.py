@@ -8,7 +8,6 @@ THEMIS constants: a task must choose exactly one of the two articulations.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 import re
 
 import mujoco
@@ -17,6 +16,7 @@ from mjlab.actuator import BuiltinMotorActuatorCfg, BuiltinPositionActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.utils.os import update_assets
 from mjlab.utils.spec_config import CollisionCfg
+from ..model import G1_XML
 
 
 @dataclass(frozen=True)
@@ -115,8 +115,6 @@ for _name in G1_JOINT_NAMES:
     raise RuntimeError(f"No G1 motor assignment for {_name}")
 
 
-_HERE = Path(__file__).parent
-G1_XML: Path = _HERE / "xmls" / "g1.xml"
 assert G1_XML.exists(), f"Missing G1 MJCF: {G1_XML}"
 
 

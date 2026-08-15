@@ -40,7 +40,6 @@ from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wandb import add_wandb_tags
 from mjlab.utils.wrappers import VideoRecorder
 
-from themis_training.mimic_mdp import MotionReferenceCommandCfg
 
 
 def _filter_shape_mismatch(
@@ -152,12 +151,12 @@ def run_finetune(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
 
   registry_name: str | None = None
   is_tracking_task = "motion" in cfg.env.commands and isinstance(
-    cfg.env.commands["motion"], (MotionCommandCfg, MotionReferenceCommandCfg)
+    cfg.env.commands["motion"], MotionCommandCfg
   )
 
   if is_tracking_task:
     motion_cmd = cfg.env.commands["motion"]
-    assert isinstance(motion_cmd, (MotionCommandCfg, MotionReferenceCommandCfg))
+    assert isinstance(motion_cmd, MotionCommandCfg)
     if motion_cmd.motion_file and Path(motion_cmd.motion_file).exists():
       print(f"[INFO] Using local motion file: {motion_cmd.motion_file}")
     elif cfg.registry_name:

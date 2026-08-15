@@ -1,5 +1,9 @@
 # 当前暂存区审计：MJLab 动作输入、精确质心动力学与 Mimic MPC 扩展
 
+> 路径说明（后续重构）：本文记录的是当时的 Git 差异。原
+> `themis_training` 下的通用模块已迁至 `training_common`/`mjlab_tools`，G1 与
+> Jingchu01 配置已迁至各自训练包；下文旧路径不表示当前入口。
+
 ## 审计范围
 
 本文只描述 Git **暂存区（index）**相对于 `HEAD` 的内容，不包含任何尚未暂存的工作区修改。

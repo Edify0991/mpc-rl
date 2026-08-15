@@ -149,7 +149,7 @@ PPO 的 mimic/regularization 回报；建议先以较大 DAgger 权重初始化�
 student rollout 占比。teacher/student 当前 actor observation 都是因果单帧 reference，便于在同一
 状态上 query；teacher 的完整 preview 只进入其 MPC/critic，不进入 actor。
 
-`themis_training.dagger_distillation` 已提供：
+`g1_training.dagger_distillation` 与 `jingchu01_training.dagger_distillation` 已提供：
 
 - `DaggerReplayBuffer`：保存 student observation、teacher joint-action target、可选 MPC landmark；
 - `teacher_joint_action_from_full_action`：从 49 维 teacher action 中取前 29 维，显式丢弃

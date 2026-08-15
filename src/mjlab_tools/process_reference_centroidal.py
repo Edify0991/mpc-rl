@@ -16,7 +16,7 @@ import mujoco
 import numpy as np
 import torch
 
-from .reference_centroidal import compute_reference_centroidal
+from training_common.reference_centroidal import compute_reference_centroidal
 
 
 def _parse_body_map(values: list[str]) -> dict[str, str]:

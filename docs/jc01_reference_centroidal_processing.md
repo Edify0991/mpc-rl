@@ -34,7 +34,7 @@ right_sole_center = right_ankle_roll: (0, 0, -0.04) m
 
 ```bash
 PYTHONPATH=src /home/user/anaconda3/envs/wmd_ampmjlab/bin/python \
-  -m themis_training.process_reference_centroidal \
+  -m mjlab_tools.process_reference_centroidal \
   assets/ref_motion/smpl_jc01_taichi1.npz \
   /home/user/wmd/jingchu01/JC01-7DOF-URDF/JC01-URDF-18所/scene_jingchu01.xml \
   assets/ref_motion/processed/smpl_jc01_taichi1_centroidal.npz \
@@ -61,7 +61,7 @@ PYTHONPATH=src /home/user/anaconda3/envs/wmd_ampmjlab/bin/python \
 
 ```bash
 PYTHONPATH=src /home/user/anaconda3/envs/wmd_ampmjlab/bin/python \
-  -m themis_training.plot_reference_centroidal \
+  -m mjlab_tools.plot_reference_centroidal \
   assets/ref_motion/processed/smpl_jc01_taichi1_centroidal.npz \
   assets/ref_motion/processed/smpl_jc01_taichi1_figures
 ```

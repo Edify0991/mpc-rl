@@ -218,14 +218,16 @@ def generalized_velocities(motion: RetargetedMotion) -> tuple[np.ndarray, np.nda
 def robot_profile(robot: str) -> tuple[mujoco.MjModel, tuple[str, ...]]:
   """Compile a committed MJLab robot profile and return its joint order."""
   if robot == "themis":
-    from .themis.themis_constants import JOINT_NAMES_EXPR, get_spec
+    from themis_training.themis.themis_constants import JOINT_NAMES_EXPR, get_spec
     joint_names = tuple(JOINT_NAMES_EXPR)
   elif robot == "g1":
-    from .g1.g1_constants import G1_JOINT_NAMES, get_spec
-    joint_names = tuple(G1_JOINT_NAMES)
+    from g1_training.model import actuated_joint_names, compile_model
+    model = compile_model()
+    return model, actuated_joint_names(model)
   elif robot == "jingchu01":
-    from .jingchu01.jingchu01_constants import JINGCHU01_JOINT_NAMES, get_spec
-    joint_names = tuple(JINGCHU01_JOINT_NAMES)
+    from jingchu01_training.model import actuated_joint_names, compile_model
+    model = compile_model()
+    return model, actuated_joint_names(model)
   else:
     raise ValueError("--robot must be themis, g1, or jingchu01")
   return get_spec().compile(), joint_names
@@ -234,13 +236,13 @@ def robot_profile(robot: str) -> tuple[mujoco.MjModel, tuple[str, ...]]:
 def robot_entity_cfg(robot: str):
   """Return the MJLab entity configuration used to capture a reference clip."""
   if robot == "themis":
-    from .themis.themis_constants import get_themis_effort_robot_cfg
+    from themis_training.themis.themis_constants import get_themis_effort_robot_cfg
     return get_themis_effort_robot_cfg()
   if robot == "g1":
-    from .g1.g1_constants import get_g1_effort_robot_cfg
+    from g1_training.g1.g1_constants import get_g1_effort_robot_cfg
     return get_g1_effort_robot_cfg()
   if robot == "jingchu01":
-    from .jingchu01.jingchu01_constants import get_jingchu01_effort_robot_cfg
+    from jingchu01_training.jingchu01.jingchu01_constants import get_jingchu01_effort_robot_cfg
     return get_jingchu01_effort_robot_cfg()
   raise ValueError("--robot must be themis, g1, or jingchu01")
 

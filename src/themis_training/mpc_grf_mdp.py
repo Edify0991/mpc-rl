@@ -18,9 +18,9 @@ from mjlab.tasks.velocity.mdp.velocity_command import (
 )
 
 from themis_mpc.centroidal_mpc import CentroidalMPC, MPCConfig, MPCInput
-from themis_mpc.contact_schedule import make_reference_contact_schedule, make_walking_schedule
+from themis_mpc.contact_schedule import make_walking_schedule
 from themis_mpc.loco_manip_mpc import LocoManipMPC, LocoManipMPCConfig, LocoManipMPCInput
-from themis_training.mpc_parameter_net import (
+from .mpc_parameter_net import (
     MPCParameterBounds,
     MPCParameters,
     decode_parameters,
@@ -460,6 +460,10 @@ class LocoMPCCommand(CommandTerm):
         x_ref[:, :, 3:9] += momentum_ramp.view(1, -1, 1) * parameters.momentum_residual.unsqueeze(1)
 
         if cfg.use_reference_contact_schedule:
+            raise RuntimeError(
+                "THEMIS baseline MPC does not implement reference-motion contact schedules. "
+                "Use g1_mpc or jingchu01_mpc for MPC-guided mimic tasks."
+            )
             if reference_contacts is None or reference_contact_state is None:
                 raise ValueError(
                     "use_reference_contact_schedule requires a MotionReferenceCommand "
@@ -1885,7 +1889,7 @@ def mpc_hand_force_tracking(
     sigma: float = 50.0,
 ) -> Tensor:
     """Reward the robot for tracking the MPC-optimal hand push forces."""
-    from themis_training.push_box_mdp import _push_mask  # noqa: PLC0415
+    from .push_box_mdp import _push_mask  # noqa: PLC0415
 
     term = env.command_manager.get_term(command_name)
     if term is None or not hasattr(term, "_hand_ref"):

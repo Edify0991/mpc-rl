@@ -1,5 +1,9 @@
 # MPC-RL Mimic / Contact 扩展：Git 工作区 17 文件审计
 
+> 路径说明（后续重构）：此文为历史审计。通用实现现位于
+> `training_common`/`mjlab_tools`，机器人私有训练配置位于
+> `g1_training`、`jingchu01_training`；以下旧路径仅用于追溯当时的差异。
+
 本文件基于当前 `git status --short` 编写，覆盖工作区中的 17 个改动文件：9 个已跟踪
 修改、6 个新增 Python 模块、2 个新增 Markdown 文档。它说明每个文件的职责、所依据的数学
 关系，以及“已接入运行时”和“仅提供后续扩展接口”的边界。

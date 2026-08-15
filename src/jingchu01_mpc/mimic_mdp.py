@@ -15,8 +15,8 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from themis_training import mpc_grf_mdp as baseline
-from themis_training.reference_centroidal import (
+from jingchu01_mpc import mpc_grf_mdp as baseline
+from training_common.reference_centroidal import (
   CentroidalState,
   ReferenceCentroidalTrajectory,
   compute_centroidal_state,
@@ -210,8 +210,6 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
         B=B, N=N, reference_contact_state=reference_contact_state,
         reference_r_LF=reference_contacts[:, :, 0], reference_r_RF=reference_contacts[:, :, 1],
         R_LF_rot=R_lf, R_RF_rot=R_rf,
-        policy_contact_state=(self._policy_contact_state if cfg.use_policy_contact_state else None),
-        policy_contact_gain=cfg.policy_contact_gain, policy_contact_horizon_decay=cfg.policy_contact_horizon_decay,
         policy_contact_plan_residual=(self._policy_contact_plan_raw if cfg.use_policy_contact_plan else None),
         policy_contact_plan_residual_scale=cfg.policy_contact_plan_residual_scale,
         preserve_nominal_support=cfg.preserve_nominal_support, device=device,
@@ -223,16 +221,7 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
       schedule = baseline.make_walking_schedule(
         B=B, N=N, r_LF=r_lf, r_RF=r_rf, gait_phase=phase, period=cfg.gait_period, dt=dt,
         duty_factor=cfg.duty_factor, com_pos=c, v_cmd=v_cmd, yaw=yaw, yaw_rate=wz, hip_width=cfg.hip_width,
-        R_LF_rot=R_lf, R_RF_rot=R_rf, phase_rate_scale=parameters.phase_rate_scale,
-        duty_factor_offset=parameters.duty_factor_offset,
-        touchdown_residual_LF=parameters.touchdown_mean_residual[:, 0],
-        touchdown_residual_RF=parameters.touchdown_mean_residual[:, 1],
-        touchdown_std_LF_xy=parameters.touchdown_std_xy[:, 0],
-        touchdown_std_RF_xy=parameters.touchdown_std_xy[:, 1],
-        reference_r_LF=(None if reference_contacts is None else reference_contacts[:, :, 0]),
-        reference_r_RF=(None if reference_contacts is None else reference_contacts[:, :, 1]),
-        policy_contact_state=(self._policy_contact_state if cfg.use_policy_contact_state else None),
-        policy_contact_gain=cfg.policy_contact_gain, device=device,
+        R_LF_rot=R_lf, R_RF_rot=R_rf, device=device,
       )
 
     mpc_in = baseline.MPCInput(

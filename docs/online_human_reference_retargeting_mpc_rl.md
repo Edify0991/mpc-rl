@@ -308,4 +308,4 @@ MPC 以 `torch.no_grad()`/detached landmark 方式被 PPO 使用，和当前 MPC
 1. Araujo et al., [Retargeting Matters: General Motion Retargeting for Humanoid Motion Tracking](https://arxiv.org/abs/2510.02252), ICRA 2026. GMR 的关键对应、非均匀局部缩放、两阶段 IK、以及 retargeting quality 对 BeyondMimic 跟踪的影响。
 2. Zhang et al., [Kinodynamic Motion Retargeting for Humanoid Locomotion via Multi-Contact Whole-Body Trajectory Optimization](https://arxiv.org/abs/2603.09956), 2026. 离线多接触 kinodynamic retargeting，直接相关的现有工作。
 3. Jeon et al., [Residual MPC: Blending Reinforcement Learning with GPU-Parallelized Model Predictive Control](https://arxiv.org/html/2510.12717), 2025. GPU RTI/SQP MPC 与 residual control 的参考。
-4. 本仓库 `docs/residual_kino_nmpc_pimpc_extension.md`、`src/themis_training/mimic_mdp.py`、`src/themis_training/reference_centroidal.py`。
+4. 本仓库 `docs/residual_kino_nmpc_pimpc_extension.md`、`src/g1_training/mimic_mdp.py`（JC01 有同构副本）、`src/training_common/reference_centroidal.py`。

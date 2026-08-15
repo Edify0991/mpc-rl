@@ -1,7 +1,7 @@
 # 参考 centroidal 量、精确在线状态与坐标系契约
 
 本文记录 motion-imitation CD-MPC 中每一个 centroidal 变量的来源、坐标系和变换。它对应
-`src/themis_training/reference_centroidal.py`、`mimic_mdp.py` 与
+`src/training_common/reference_centroidal.py`、各机器人包中的 `mimic_mdp.py` 与
 `mpc_grf_mdp.py` 的现行实现。
 
 ## 1. 坐标系与状态约定

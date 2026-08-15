@@ -1,7 +1,8 @@
 # Phase-2 DAgger + PPO 集成实施方案
 
 本文档是 `Mjlab-MPC-RL-Mimic-Student-Themis` 的**后续实现规范**。当前仓库已经有
-`themis_training.dagger_distillation` 中的 DAgger ring buffer、目标损失和单步
+`g1_training.dagger_distillation` 与 `jingchu01_training.dagger_distillation`
+中的 DAgger ring buffer、目标损失和单步
 supervised update，但 `VelocityOnPolicyRunner` 仍是原生 PPO runner，尚未执行本文所述的
 teacher query、数据收集、动作混合或交替更新。
 
