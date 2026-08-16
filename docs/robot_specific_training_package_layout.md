@@ -25,15 +25,19 @@ Jingchu01 不再从这里注册；它们各自是独立的 `mjlab.tasks` entry p
 src/
   themis_training/             # 仅 THEMIS 私有任务、MPC MDP 与 runner cfg
   g1_training/
-    constants.py               # G1 MJCF、关节、执行器和 centroidal 参数
+    g1/g1_constants.py         # G1 MJCF、关节、执行器和 centroidal 参数
     g1/xmls/                   # G1 专属资产（与 themis/xmls 同一层级惯例）
     env_cfgs.py                # G1 原始任务与 mimic 工厂
+    mpc_grf_mdp.py             # G1 训练 command、MPC landmark/GRF MDP
+    mpc_grf_mimic_mdp.py       # G1 mimic 专用 MPC command/landmark MDP
     rl_cfg.py                  # G1 私有 PPO 网络与优化参数
     __init__.py                # 注册 G1 IDs（entry point）
   jingchu01_training/
-    constants.py               # JC01 专属模型与动力学参数
+    jingchu01/jingchu01_constants.py # JC01 专属模型与动力学参数
     jingchu01/xmls/            # JC01 专属资产（与 themis/xmls 同一层级惯例）
     env_cfgs.py                # JC01 原始任务与 mimic 工厂
+    mpc_grf_mdp.py             # JC01 训练 command、MPC landmark/GRF MDP
+    mpc_grf_mimic_mdp.py       # JC01 mimic 专用 MPC command/landmark MDP
     rl_cfg.py                  # JC01 私有 PPO 网络与优化参数
     __init__.py                # 注册 Jingchu01 IDs（entry point）
   training_common/             # 无机器人名称的纯数学/reference 与配置装配

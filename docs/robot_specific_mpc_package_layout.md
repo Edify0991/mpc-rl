@@ -6,12 +6,12 @@
 centroidal QP、PiMPC/JAX-PiMPC 与 THEMIS loco-manipulation。它不再包含 reference-motion contact
 schedule，也不为 mimic 任务提供落足/时序参数化入口。
 
-G1 和 Jingchu01 的 mimic CD-MPC 使用各自独立包：
+G1 和 Jingchu01 的 CD-MPC solver 使用各自独立包：
 
 ```text
 src/themis_mpc/       THEMIS paper baseline only
-src/g1_mpc/           Unitree G1 QP/PiMPC copy + G1 mimic extension
-src/jingchu01_mpc/    Jingchu01 QP/PiMPC copy + Jingchu01 mimic extension
+src/g1_mpc/           Unitree G1 QP/PiMPC copy + G1 schedule
+src/jingchu01_mpc/    Jingchu01 QP/PiMPC copy + Jingchu01 schedule
 ```
 
 三个包均是独立 Python package；因此后续机器人特有的质量、足底参数、接触几何、约束与 solver 改动
@@ -23,9 +23,15 @@ src/jingchu01_mpc/    Jingchu01 QP/PiMPC copy + Jingchu01 mimic extension
 |---|---:|---|
 | `admm_qp.py`, `pimpc.py`, `jax_pimpc.py`, `centroidal_mpc.py`, `loco_manip_mpc.py` | 是 | 从 THEMIS 基线复制的 solver/MPC 实现；包内 import 已改为本机器人包名。 |
 | `contact_schedule.py` | 是 | 已实现的 mimic schedule：reference 的 (H) 帧接触状态/位置，加冻结的 full-horizon **activation** residual。 |
-| `mpc_grf_mdp.py` | 是 | 本机器人 command/landmark 基础实现；构造 `g1_mpc.*` 或 `jingchu01_mpc.*` 的 solver 与默认 schedule。 |
-| `mimic_mdp.py` | 是 | 精确 articulated centroidal (x_0)、reference (x^{ref})、contact plan 和 exact landmark reward。 |
 | `experimental_contact_schedule.py` | 否 | 以前加入的 phase-rate、duty-factor、落足均值/方差、Raibert/reference touchdown residual、fast contact-intention 参数化。 |
+
+训练 MDP 不属于 solver package。每个 `*_training/` 包中分别拥有：
+
+| 文件 | 用途 |
+|---|---|
+| `mpc_grf_mdp.py` | 本机器人 `LocoMPCCommand`、原论文 MPC landmark/GRF reward 与训练特征。 |
+| `mimic_mdp.py` | MotionReference command、mimic 观测与全身跟踪奖励。 |
+| `mpc_grf_mimic_mdp.py` | mimic 专用 CD-MPC command、精确 articulated centroidal \(x_0\)、reference \(x^{ref}\)、contact-plan 与 exact landmark reward。 |
 
 ## 默认 mimic contact schedule
 
@@ -47,8 +53,8 @@ src/jingchu01_mpc/    Jingchu01 QP/PiMPC copy + Jingchu01 mimic extension
 
 ## 实验性 schedule 的隔离
 
-`experimental_contact_schedule.py` 保留了原先的探索性设计，但没有被 `centroidal_mpc.py`、
-`mpc_grf_mdp.py` 或任何 task config 导入。它包括：
+`experimental_contact_schedule.py` 保留了原先的探索性设计，但没有被 `centroidal_mpc.py` 或任何
+task config 导入。它包括：
 
 - `phase_rate_scale` 与 `duty_factor_offset`；
 - touchdown mean residual 与 (xy) standard deviation metadata；
@@ -61,8 +67,8 @@ guard、reward/landmark 定义，以及随机落足或 chance constraint 的理�
 
 ## 任务接线
 
-- `g1_training/env_cfgs.py` 导入 `g1_mpc.mimic_mdp`；
-- `jingchu01_training/env_cfgs.py` 导入 `jingchu01_mpc.mimic_mdp`；
+- `g1_training/env_cfgs.py` 导入同包的 `mpc_grf_mdp.py` 与 `mpc_grf_mimic_mdp.py`；
+- `jingchu01_training/env_cfgs.py` 导入同包的 `mpc_grf_mdp.py` 与 `mpc_grf_mimic_mdp.py`；
 - 两者将从 THEMIS base config 得到的 `LocoMPCCommandCfg` 浅复制为各自
   `MimicLocoMPCCommandCfg`，再写入 robot-specific mass/inertia/site/contact 参数；
 - `themis_training.__init__` 不再注册 THEMIS MPC-mimic/hierarchical/student task。THEMIS 保留

@@ -15,7 +15,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from jingchu01_mpc import mpc_grf_mdp as baseline
+from . import mpc_grf_mdp as baseline
 from training_common.reference_centroidal import (
   CentroidalState,
   ReferenceCentroidalTrajectory,

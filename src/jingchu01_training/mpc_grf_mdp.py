@@ -20,7 +20,7 @@ from mjlab.tasks.velocity.mdp.velocity_command import (
 from jingchu01_mpc.centroidal_mpc import CentroidalMPC, MPCConfig, MPCInput
 from jingchu01_mpc.contact_schedule import make_reference_contact_schedule, make_walking_schedule
 from jingchu01_mpc.loco_manip_mpc import LocoManipMPC, LocoManipMPCConfig, LocoManipMPCInput
-from jingchu01_training.mpc_parameter_net import (
+from .mpc_parameter_net import (
     MPCParameterBounds,
     MPCParameters,
     decode_parameters,

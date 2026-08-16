@@ -17,8 +17,8 @@ from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from . import hybrid_mimic, mimic_mdp
-from jingchu01_mpc import mimic_mdp as jingchu01_mpc_mimic_mdp
-from jingchu01_mpc import mpc_grf_mdp as jingchu01_mpc_grf_mdp
+from . import mpc_grf_mimic_mdp as jingchu01_mpc_mimic_mdp
+from . import mpc_grf_mdp as jingchu01_mpc_grf_mdp
 from training_common.mpc_locomotion_features import apply_mpc_grf_features, apply_mpc_grf_v2_features
 from .hybrid_mimic import HybridMimicActionCfg
 from .jingchu01.jingchu01_constants import (
@@ -37,8 +37,8 @@ from .jingchu01.jingchu01_constants import (
   get_jingchu01_robot_cfg,
 )
 from .mimic_mdp import MotionReferenceCommandCfg
-from jingchu01_mpc.mimic_mdp import MimicLocoMPCCommandCfg
-from jingchu01_mpc.mpc_grf_mdp import (
+from .mpc_grf_mimic_mdp import MimicLocoMPCCommandCfg
+from .mpc_grf_mdp import (
   LocoMPCCommandCfg as Jingchu01LocoMPCCommandCfg,
   LocoManipMPCCommandCfg as Jingchu01LocoManipMPCCommandCfg,
 )

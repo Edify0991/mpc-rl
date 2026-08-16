@@ -23,8 +23,8 @@ from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from . import hybrid_mimic, mimic_mdp
-from g1_mpc import mimic_mdp as g1_mpc_mimic_mdp
-from g1_mpc import mpc_grf_mdp as g1_mpc_grf_mdp
+from . import mpc_grf_mimic_mdp as g1_mpc_mimic_mdp
+from . import mpc_grf_mdp as g1_mpc_grf_mdp
 from training_common.mpc_locomotion_features import apply_mpc_grf_features, apply_mpc_grf_v2_features
 from .g1.g1_constants import (
   DAMPING,
@@ -39,8 +39,8 @@ from .g1.g1_constants import (
 )
 from .hybrid_mimic import HybridMimicActionCfg
 from .mimic_mdp import MotionReferenceCommandCfg
-from g1_mpc.mimic_mdp import MimicLocoMPCCommandCfg
-from g1_mpc.mpc_grf_mdp import (
+from .mpc_grf_mimic_mdp import MimicLocoMPCCommandCfg
+from .mpc_grf_mdp import (
   LocoMPCCommandCfg as G1LocoMPCCommandCfg,
   LocoManipMPCCommandCfg as G1LocoManipMPCCommandCfg,
 )
