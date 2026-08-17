@@ -161,7 +161,9 @@ def jingchu01_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # rather than ``body_orientation_l2`` in the upstream AMP configuration.
   cfg.rewards["upright"].params["asset_cfg"].body_names = (JINGCHU01_ANCHOR_BODY_NAME,)
   cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = (JINGCHU01_ANCHOR_BODY_NAME,)
-  for term in ("foot_clearance", "foot_slip"):
+  # Keep site ordering consistent with the two-foot contact sensor.  This is
+  # also required by the stateful ``foot_swing_height`` reward.
+  for term in ("foot_clearance", "foot_swing_height", "foot_slip"):
     cfg.rewards[term].params["asset_cfg"].site_names = JINGCHU01_FEET_SITE_NAMES
   cfg.rewards["self_collisions"] = RewardTermCfg(
     func=mdp.self_collision_cost,
@@ -241,6 +243,9 @@ def _add_motion_reference(
   )
   cfg.rewards["motion_body"] = RewardTermCfg(
     func=mimic_mdp.motion_relative_body_position_error_exp, weight=2.0, params={"command_name": "motion", "std": 0.3}
+  )
+  cfg.rewards["tracking_success"] = RewardTermCfg(
+    func=mimic_mdp.tracking_success, weight=0.25, params={"command_name": "motion"}
   )
 
 

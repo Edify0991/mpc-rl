@@ -695,3 +695,28 @@ def motion_anchor_position_error_exp(
   command = _motion(env, command_name)
   error = (command.body_pos_w[:, command.anchor_index] - command.robot_body_pos_w[:, command.anchor_index]).square().sum(dim=-1)
   return torch.exp(-error / std**2)
+
+
+def tracking_success(
+  env: "ManagerBasedRlEnv",
+  command_name: str = "motion",
+  joint_rms_threshold: float = 0.35,
+  anchor_position_threshold: float = 0.25,
+  upright_cos_threshold: float = 0.5,
+) -> torch.Tensor:
+  """Binary whole-body tracking-success signal for the task critic.
+
+  This is separate from dense ``motion_*`` terms: successful imitation must
+  satisfy joint and anchor tracking while the base remains upright.
+  """
+  command = _motion(env, command_name)
+  joint_rms = (command.joint_pos - command.robot_joint_pos).square().mean(dim=-1).sqrt()
+  anchor_error = (
+    command.body_pos_w[:, command.anchor_index] - command.robot_body_pos_w[:, command.anchor_index]
+  ).norm(dim=-1)
+  upright_cos = -command.robot.data.projected_gravity_b[:, 2]
+  return (
+    (joint_rms <= joint_rms_threshold)
+    & (anchor_error <= anchor_position_threshold)
+    & (upright_cos >= upright_cos_threshold)
+  ).to(dtype=joint_rms.dtype)

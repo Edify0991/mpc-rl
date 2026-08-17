@@ -114,12 +114,18 @@ def _load_checkpoint_loose(runner: MjlabOnPolicyRunner, path: str) -> None:
   critic = runner.alg.critic
 
   filtered_actor = _filter_shape_mismatch(actor_sd, actor, "actor")
-  filtered_critic = _filter_shape_mismatch(
-    loaded_dict.get("critic_state_dict", {}), critic, "critic"
-  )
-
   actor.load_state_dict(filtered_actor, strict=False)
-  critic.load_state_dict(filtered_critic, strict=False)
+  critics = getattr(runner.alg, "critics", None)
+  if critics is not None and "critics_state_dict" in loaded_dict:
+    filtered_critics = _filter_shape_mismatch(
+      loaded_dict["critics_state_dict"], critics, "multi_critic"
+    )
+    critics.load_state_dict(filtered_critics, strict=False)
+  else:
+    filtered_critic = _filter_shape_mismatch(
+      loaded_dict.get("critic_state_dict", {}), critic, "critic"
+    )
+    critic.load_state_dict(filtered_critic, strict=False)
 
   # Optimizer state references parameter IDs that may have been re-initialised;
   # skip it so momentum doesn't carry stale statistics.

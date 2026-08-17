@@ -64,7 +64,9 @@ def add_push_box_loco_manipulation(
     name="body_box_contact",
     primary=ContactMatch(mode="geom", pattern=body_box_geoms, entity="robot"),
     secondary=ContactMatch(mode="geom", pattern="box_geom", entity="box"),
-    fields=("force",), reduce="netforce", num_slots=1,
+    # ``leg_box_collision_cost`` uses the contact-match count, while the
+    # loco-manipulation MPC reads the net force from this same sensor.
+    fields=("found", "force"), reduce="netforce", num_slots=1,
   )
   cfg.scene.sensors = (cfg.scene.sensors or ()) + (lhand, rhand, body)
 

@@ -72,6 +72,16 @@ class LocoMPCCommandCfg(CommandTermCfg):
     inertia_body: tuple[tuple[float, float, float], ...] = _I_BODY
     hip_width: float = 0.1
 
+    # Contact-wrench cone parameters, expressed about the two configured
+    # foot sites.  Defaults reproduce the original THEMIS-compatible QP;
+    # each robot-local task must explicitly provide its measured foot geometry.
+    foot_x_toe: float = 0.12
+    foot_x_heel: float = 0.06
+    foot_y_half: float = 0.04
+    mu_foot: float = 0.6
+    mu_foot_yaw: float = 0.1
+    fz_max_foot: float = 800.0
+
     gait_period: float = 0.9
     duty_factor: float = 0.5
 
@@ -168,6 +178,12 @@ class LocoMPCCommand(CommandTerm):
             N=cfg.mpc_horizon,
             dt=cfg.mpc_dt,
             mass=cfg.mass,
+            foot_x_toe=cfg.foot_x_toe,
+            foot_x_heel=cfg.foot_x_heel,
+            foot_y_half=cfg.foot_y_half,
+            mu_foot=cfg.mu_foot,
+            mu_foot_yaw=cfg.mu_foot_yaw,
+            fz_max_foot=cfg.fz_max_foot,
             solver_type=cfg.solver_type,
             unconstrained=cfg.unconstrained,
         )
@@ -1502,6 +1518,12 @@ class LocoManipMPCCommand(LocoMPCCommand):
             N=cfg.mpc_horizon,
             dt=cfg.mpc_dt,
             mass=cfg.mass,
+            foot_x_toe=cfg.foot_x_toe,
+            foot_x_heel=cfg.foot_x_heel,
+            foot_y_half=cfg.foot_y_half,
+            mu_foot=cfg.mu_foot,
+            mu_foot_yaw=cfg.mu_foot_yaw,
+            fz_max_foot=cfg.fz_max_foot,
             mu_hand=cfg.mu_hand,
             f_hand_max=cfg.f_hand_max,
             R_f_hand=cfg.R_f_hand,

@@ -8,6 +8,8 @@ share factories with) the reference-motion/mimic pipeline.
 from mjlab.tasks.registry import register_mjlab_task
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
+from .multi_critic import MultiCriticVelocityOnPolicyRunner
+
 from .env_cfgs import (
   g1_flat_env_cfg,
   g1_hierarchical_hybrid_mimic_env_cfg,
@@ -19,6 +21,8 @@ from .env_cfgs import (
 )
 from .rl_cfg import (
   g1_hierarchical_mimic_ppo_runner_cfg,
+  g1_multi_critic_hierarchical_mimic_ppo_runner_cfg,
+  g1_multi_critic_mpc_rl_mimic_ppo_runner_cfg,
   g1_mpc_rl_mimic_contact_ppo_runner_cfg,
   g1_mpc_rl_mimic_student_ppo_runner_cfg,
   g1_ppo_runner_cfg,
@@ -59,8 +63,8 @@ register_mjlab_task(
   task_id="Mjlab-MPC-RL-Mimic-Contact-G1-29DOF",
   env_cfg=g1_mpc_rl_mimic_contact_env_cfg(),
   play_env_cfg=g1_mpc_rl_mimic_contact_env_cfg(play=True),
-  rl_cfg=g1_mpc_rl_mimic_contact_ppo_runner_cfg(),
-  runner_cls=VelocityOnPolicyRunner,
+  rl_cfg=g1_multi_critic_mpc_rl_mimic_ppo_runner_cfg(),
+  runner_cls=MultiCriticVelocityOnPolicyRunner,
 )
 register_mjlab_task(
   task_id="Mjlab-MPC-RL-Mimic-Student-G1-29DOF",
@@ -73,6 +77,6 @@ register_mjlab_task(
   task_id="Mjlab-Hierarchical-HybridMimic-MPC-G1-29DOF",
   env_cfg=g1_hierarchical_hybrid_mimic_env_cfg(),
   play_env_cfg=g1_hierarchical_hybrid_mimic_env_cfg(play=True),
-  rl_cfg=g1_hierarchical_mimic_ppo_runner_cfg(),
-  runner_cls=VelocityOnPolicyRunner,
+  rl_cfg=g1_multi_critic_hierarchical_mimic_ppo_runner_cfg(),
+  runner_cls=MultiCriticVelocityOnPolicyRunner,
 )

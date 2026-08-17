@@ -32,6 +32,12 @@ from .g1.g1_constants import (
   G1_CENTROIDAL_INERTIA_BODY,
   G1_CENTROIDAL_BODY_NAMES,
   G1_JOINT_NAMES,
+  G1_MPC_FOOT_X_HEEL,
+  G1_MPC_FOOT_X_TOE,
+  G1_MPC_FOOT_Y_HALF,
+  G1_MPC_FZ_MAX_FOOT,
+  G1_MPC_MU_FOOT,
+  G1_MPC_MU_FOOT_YAW,
   G1_TOTAL_MASS,
   STIFFNESS,
   get_g1_effort_robot_cfg,
@@ -53,6 +59,18 @@ G1_FOOT_GEOMS = tuple(
   f"{side}_foot{i}_collision" for side in ("left", "right") for i in range(1, 8)
 )
 
+
+def _g1_mpc_foot_wrench_kwargs() -> dict[str, float]:
+  """Return MJCF-derived foot-wrench limits for the G1 centroidal QP."""
+  return {
+    "foot_x_toe": G1_MPC_FOOT_X_TOE,
+    "foot_x_heel": G1_MPC_FOOT_X_HEEL,
+    "foot_y_half": G1_MPC_FOOT_Y_HALF,
+    "mu_foot": G1_MPC_MU_FOOT,
+    "mu_foot_yaw": G1_MPC_MU_FOOT_YAW,
+    "fz_max_foot": G1_MPC_FZ_MAX_FOOT,
+  }
+
 # Ordered only where an input reference has matching G1 body channels.  A
 # MotionReferenceCommand performs strict name checking at load time, rather
 # than quietly applying a G1 clip to a different morphology.
@@ -73,6 +91,7 @@ def g1_mpc_locomotion_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     left_foot_site_name="left_foot", right_foot_site_name="right_foot",
     mpc_dt=0.07, mpc_horizon=10, mass=G1_TOTAL_MASS,
     inertia_body=G1_CENTROIDAL_INERTIA_BODY, hip_width=0.15,
+    **_g1_mpc_foot_wrench_kwargs(),
     gait_period=0.9, duty_factor=0.5, vel_cmd_name="twist",
     grf_sensor_name="feet_ground_contact", run_every_n_steps=5,
   )
@@ -96,6 +115,8 @@ def g1_mpc_loco_manipulation_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg
     mpc_horizon=10,
     mass=G1_TOTAL_MASS,
     inertia_body=G1_CENTROIDAL_INERTIA_BODY,
+    hip_width=0.15,
+    **_g1_mpc_foot_wrench_kwargs(),
     gait_period=0.8,
     run_every_n_steps=5,
     asset_cfg=SceneEntityCfg("robot", site_names=G1_FOOT_SITES),
@@ -192,7 +213,11 @@ def g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # (some upstream mjlab versions call the same term body_orientation_l2).
   cfg.rewards["upright"].params["asset_cfg"].body_names = ("torso_link",)
   cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("torso_link",)
-  for term in ("foot_clearance", "foot_slip"):
+  # All three upstream foot rewards receive an empty site list by default.
+  # ``foot_swing_height`` is stateful and must have the same two-site order as
+  # ``feet_ground_contact``; otherwise it allocates [B, 0] peak heights while
+  # the contact sensor emits [B, 2] air/contact flags.
+  for term in ("foot_clearance", "foot_swing_height", "foot_slip"):
     cfg.rewards[term].params["asset_cfg"].site_names = G1_FOOT_SITES
   cfg.rewards["self_collisions"] = RewardTermCfg(
     func=mdp.self_collision_cost,
@@ -274,6 +299,9 @@ def _add_motion_reference(
   )
   cfg.rewards["motion_body"] = RewardTermCfg(
     func=mimic_mdp.motion_relative_body_position_error_exp, weight=2.0, params={"command_name": "motion", "std": 0.3}
+  )
+  cfg.rewards["tracking_success"] = RewardTermCfg(
+    func=mimic_mdp.tracking_success, weight=0.25, params={"command_name": "motion"}
   )
 
 

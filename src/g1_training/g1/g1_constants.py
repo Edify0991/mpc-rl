@@ -81,6 +81,23 @@ G1_CENTROIDAL_BODY_NAMES: tuple[str, ...] = (
   "right_elbow_link", "right_wrist_roll_link", "right_wrist_pitch_link", "right_wrist_yaw_link",
 )
 
+# Centroidal-MPC foot wrench limits expressed about the ``left_foot`` /
+# ``right_foot`` sites.  The sites are at x=0.040 m in their respective foot
+# frames.  The collision capsules span x=[-0.054, 0.132] m and
+# |y|<=0.026 m, with a 0.010 m capsule radius.  Hence the support extents
+# about the site are approximately 0.104 m rear, 0.102 m front, and 0.036 m
+# laterally.  Keeping these values next to the MJCF-owned robot constants
+# makes the wrench cone auditable and prevents the generic THEMIS geometry
+# from silently being used by a G1 task.
+G1_MPC_FOOT_X_TOE: float = 0.102
+G1_MPC_FOOT_X_HEEL: float = 0.104
+G1_MPC_FOOT_Y_HALF: float = 0.036
+G1_MPC_MU_FOOT: float = 0.6
+G1_MPC_MU_FOOT_YAW: float = 0.1
+# This remains the established MPC force cap until it is calibrated against
+# measured G1 joint-torque saturation and ground-reaction-force rollouts.
+G1_MPC_FZ_MAX_FOOT: float = 800.0
+
 
 def _joint_map(motor: MotorSpec, *patterns: str) -> dict[str, float]:
   return {pattern: motor.stiffness for pattern in patterns}
