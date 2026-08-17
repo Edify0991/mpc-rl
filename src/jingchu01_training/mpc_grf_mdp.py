@@ -1,4 +1,4 @@
-"""Centroidal locomotion MPC + GRF tracking pipeline for THEMIS training."""
+"""Paper-compatible Jingchu01 centroidal-MPC velocity and loco-manipulation MDP."""
 
 from __future__ import annotations
 
@@ -18,24 +18,21 @@ from mjlab.tasks.velocity.mdp.velocity_command import (
 )
 
 from jingchu01_mpc.centroidal_mpc import CentroidalMPC, MPCConfig, MPCInput
-from jingchu01_mpc.contact_schedule import make_reference_contact_schedule, make_walking_schedule
+from jingchu01_mpc.contact_schedule import make_walking_schedule
 from jingchu01_mpc.loco_manip_mpc import LocoManipMPC, LocoManipMPCConfig, LocoManipMPCInput
-from .mpc_parameter_net import (
-    MPCParameterBounds,
-    MPCParameters,
-    decode_parameters,
-    nominal_parameters,
+from .jingchu01.jingchu01_constants import (
+    JINGCHU01_CENTROIDAL_INERTIA_BODY,
+    JINGCHU01_MPC_FOOT_X_HEEL,
+    JINGCHU01_MPC_FOOT_X_TOE,
+    JINGCHU01_MPC_FOOT_Y_HALF,
+    JINGCHU01_MPC_FZ_MAX_FOOT,
+    JINGCHU01_MPC_MU_FOOT,
+    JINGCHU01_MPC_MU_FOOT_YAW,
 )
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
     from mjlab.viewer.debug_visualizer import DebugVisualizer
-
-_I_BODY: tuple[tuple[float, ...], ...] = (
-    ( 6.153, 0.0,   0.338),
-    ( 0.0,   6.181, 0.0  ),
-    ( 0.338, 0.0,   0.849),
-)
 
 def _quat_to_rot(q: Tensor) -> Tensor:
     """Convert unit quaternions (B, 4) [w, x, y, z] to rotation matrices (B, 3, 3)."""
@@ -56,21 +53,20 @@ class LocoMPCCommandCfg(CommandTermCfg):
             site_names=("left_foot", "right_foot"),
         )
     )
-    # Canonical contact order is left then right.  The default preserves the
-    # existing THEMIS/G1 MJCF names; other robots may use different site names
-    # without changing the QP's two-contact ordering.
-    left_foot_site_name: str = "left_foot"
-    right_foot_site_name: str = "right_foot"
+    left_foot_site_name: str = "left_foot_site"
+    right_foot_site_name: str = "right_foot_site"
 
     mpc_dt: float = 0.07
     mpc_horizon: int = 10
     mass: float = 37.0
-    # Body-frame composite inertia used to turn the measured root angular
-    # velocity into the initial angular-momentum estimate.  Keep the THEMIS
-    # value as the default for backward compatibility; robot-specific tasks
-    # must override it rather than reusing a mismatched model.
-    inertia_body: tuple[tuple[float, float, float], ...] = _I_BODY
+    inertia_body: tuple[tuple[float, float, float], ...] = JINGCHU01_CENTROIDAL_INERTIA_BODY
     hip_width: float = 0.1
+    foot_x_toe: float = JINGCHU01_MPC_FOOT_X_TOE
+    foot_x_heel: float = JINGCHU01_MPC_FOOT_X_HEEL
+    foot_y_half: float = JINGCHU01_MPC_FOOT_Y_HALF
+    mu_foot: float = JINGCHU01_MPC_MU_FOOT
+    mu_foot_yaw: float = JINGCHU01_MPC_MU_FOOT_YAW
+    fz_max_foot: float = JINGCHU01_MPC_FZ_MAX_FOOT
 
     gait_period: float = 0.9
     duty_factor: float = 0.5
@@ -78,42 +74,6 @@ class LocoMPCCommandCfg(CommandTermCfg):
     com_height: float = 1.17
 
     vel_cmd_name: str = "twist"
-
-    # Optional BeyondMimic reference command.  When supplied, its torso/pelvis
-    # trajectory replaces velocity-command integration in ``x_ref`` so the
-    # centroidal QP is conditioned on the imitated motion itself.
-    motion_command_name: str | None = None
-
-    # Optional TorchScript MPC-parameter adaptor.  It does not output joint
-    # torques: it only freezes bounded contact timing/foothold/momentum
-    # parameters before the convex centroidal QP is assembled.
-    parameter_network_path: str | None = None
-    parameter_history_steps: int = 8
-    parameter_bounds: MPCParameterBounds = field(default_factory=MPCParameterBounds)
-
-    # In the hierarchical imitation task, the high-level PPO action replaces
-    # ``parameter_network_path``.  The action is held at a slower rate and is
-    # decoded into the same bounded quantities before building the QP.
-    # Keeping the QP input explicit preserves the non-differentiable
-    # MPC-landmark training interface: no gradient is propagated through MPC.
-    use_hierarchical_parameters: bool = False
-
-    # A fast policy contact-intention action is mapped to a continuous contact
-    # activation before each QP solve.  It is supervised by simulated contact
-    # rewards; no standalone contact-prediction model is used.
-    use_policy_contact_state: bool = False
-    policy_contact_gain: float = 0.75
-    # Non-periodic motion imitation may provide the complete contact sequence
-    # from the reference clip instead of synthesising it from a gait clock.
-    use_reference_contact_schedule: bool = False
-    policy_contact_horizon_decay: float = 0.5
-    # Full-horizon contact-plan residual emitted by the Phase-1 teacher. It
-    # is added to the reference schedule before each QP solve.
-    use_policy_contact_plan: bool = False
-    policy_contact_plan_residual_scale: float = 0.75
-    # Keep at least one nominal support after applying an exploratory contact
-    # residual. True reference flight stages remain contact-free.
-    preserve_nominal_support: bool = True
 
     grf_sensor_name: str = "feet_ground_contact"
 
@@ -146,19 +106,8 @@ class LocoMPCCommand(CommandTerm):
         _, _resolved_names = self._robot.find_sites(
             cfg.asset_cfg.site_names, preserve_order=False
         )
-        try:
-            self._lf_site_local_idx = next(
-                i for i, n in enumerate(_resolved_names) if n == cfg.left_foot_site_name
-            )
-            self._rf_site_local_idx = next(
-                i for i, n in enumerate(_resolved_names) if n == cfg.right_foot_site_name
-            )
-        except StopIteration as exc:
-            raise ValueError(
-                "MPC foot sites are not present in asset_cfg.site_names: "
-                f"left={cfg.left_foot_site_name!r}, right={cfg.right_foot_site_name!r}, "
-                f"resolved={_resolved_names}"
-            ) from exc
+        self._lf_site_local_idx = next(i for i, n in enumerate(_resolved_names) if n == cfg.left_foot_site_name)
+        self._rf_site_local_idx = next(i for i, n in enumerate(_resolved_names) if n == cfg.right_foot_site_name)
 
         self._I_approx = torch.tensor(
             cfg.inertia_body, device=env.device, dtype=torch.float32
@@ -168,6 +117,12 @@ class LocoMPCCommand(CommandTerm):
             N=cfg.mpc_horizon,
             dt=cfg.mpc_dt,
             mass=cfg.mass,
+            foot_x_toe=cfg.foot_x_toe,
+            foot_x_heel=cfg.foot_x_heel,
+            foot_y_half=cfg.foot_y_half,
+            mu_foot=cfg.mu_foot,
+            mu_foot_yaw=cfg.mu_foot_yaw,
+            fz_max_foot=cfg.fz_max_foot,
             solver_type=cfg.solver_type,
             unconstrained=cfg.unconstrained,
         )
@@ -179,42 +134,16 @@ class LocoMPCCommand(CommandTerm):
         self._u_prev: Tensor = torch.zeros(B, 12, device=env.device)
         self._step_count: int = 0
 
-        self._parameter_history = torch.zeros(
-            B, cfg.parameter_history_steps, 29, device=env.device
-        )
-        self._mpc_parameters = nominal_parameters(B, device=env.device, dtype=torch.float32)
-        self._hierarchical_parameter_raw = torch.zeros(B, 16, device=env.device)
-        self._policy_contact_state = torch.full((B, 2), 0.5, device=env.device)
-        self._policy_contact_plan_raw = torch.zeros(B, N, 2, device=env.device)
-        self._contact_plan_mpc = torch.zeros(B, N, 2, device=env.device)
-        # False means the non-looping source clip ended before this horizon
-        # stage. The MPC still receives a static terminal reference there,
-        # but delayed contact-label supervision must not score it.
-        self._contact_plan_valid = torch.ones(B, N, dtype=torch.bool, device=env.device)
-        self._parameter_net: torch.jit.ScriptModule | None = None
-        if cfg.parameter_network_path is not None:
-            self._parameter_net = torch.jit.load(
-                cfg.parameter_network_path, map_location=env.device
-            ).eval()
-            for parameter in self._parameter_net.parameters():
-                parameter.requires_grad_(False)
-
         self._com_traj:  Tensor = torch.zeros(B, N, 3, device=env.device)
         self._vel_traj:  Tensor = torch.zeros(B, N, 3, device=env.device)
         self._k_traj:    Tensor = torch.zeros(B, N, 3, device=env.device)
         self._kdot_traj: Tensor = torch.zeros(B, N, 3, device=env.device)
-        self._u_traj: Tensor = torch.zeros(B, N, 12, device=env.device)
-        self._sigma_traj: Tensor = torch.zeros(B, N, 2, device=env.device)
         self._traj_step: int = 0
 
         self._com_mpc_target:      Tensor = torch.zeros(B, 3, device=env.device)
         self._com_vel_mpc_target:  Tensor = torch.zeros(B, 3, device=env.device)
         self._k_mpc_target:        Tensor = torch.zeros(B, 3, device=env.device)
         self._k_dot_mpc_target:    Tensor = torch.zeros(B, 3, device=env.device)
-        self._u_mpc_target:        Tensor = torch.zeros(B, 12, device=env.device)
-        self._force_mpc_target:    Tensor = torch.zeros(B, 2, 3, device=env.device)
-        self._moment_mpc_target:   Tensor = torch.zeros(B, 2, 3, device=env.device)
-        self._contact_mpc_target:  Tensor = torch.zeros(B, 2, device=env.device)
 
         self._vis_com:      Tensor = torch.zeros(B, N, 3, device=env.device)
         self._vis_ang_mom:  Tensor = torch.zeros(B, N, 3, device=env.device)
@@ -233,66 +162,6 @@ class LocoMPCCommand(CommandTerm):
         """Optimal first-step foot forces [B, 6]: [fLF(3), fRF(3)]."""
         return self._grf_ref
 
-    def set_hierarchical_parameters(self, raw: Tensor) -> None:
-        """Set the held high-level policy action used by the next MPC solve.
-
-        ``raw`` deliberately stays in the unbounded policy space.  It is
-        transformed only by :func:`decode_parameters`, exactly as for the
-        optional GRU adaptor, so every resulting contact schedule and QP
-        remains bounded.  The copy detaches the action from PPO's graph: the
-        low-level learner is guided by MPC landmarks, not by differentiation
-        through the solver or the simulator.
-        """
-        if not self.cfg.use_hierarchical_parameters:
-            raise RuntimeError("hierarchical MPC parameters are disabled in this command config")
-        if raw.shape != self._hierarchical_parameter_raw.shape:
-            raise ValueError(
-                "Expected hierarchical MPC action "
-                f"{tuple(self._hierarchical_parameter_raw.shape)}, got {tuple(raw.shape)}"
-            )
-        self._hierarchical_parameter_raw.copy_(raw.detach().to(self.device, dtype=torch.float32))
-
-    def reset_hierarchical_parameters(self, env_ids: Tensor | slice | None = None) -> None:
-        """Restore nominal high-level MPC parameters for reset environments."""
-        if env_ids is None:
-            env_ids = slice(None)
-        self._hierarchical_parameter_raw[env_ids] = 0.0
-
-    def set_policy_contact_state(self, contact_state: Tensor) -> None:
-        """Set continuous foot-contact activation from the fast RL action."""
-        if not self.cfg.use_policy_contact_state:
-            raise RuntimeError("policy contact-state actions are disabled in this command config")
-        if contact_state.shape != self._policy_contact_state.shape:
-            raise ValueError(
-                "Expected policy contact state "
-                f"{tuple(self._policy_contact_state.shape)}, got {tuple(contact_state.shape)}"
-            )
-        self._policy_contact_state.copy_(contact_state.detach().to(self.device, dtype=torch.float32))
-
-    def reset_policy_contact_state(self, env_ids: Tensor | slice | None = None) -> None:
-        """Restore neutral (nominal-schedule preserving) contact activations."""
-        if env_ids is None:
-            env_ids = slice(None)
-        self._policy_contact_state[env_ids] = 0.5
-
-    def set_policy_contact_plan(self, contact_plan_raw: Tensor) -> None:
-        """Set the Phase-1 full-horizon contact-plan residual from RL."""
-        if not self.cfg.use_policy_contact_plan:
-            raise RuntimeError("policy contact-plan actions are disabled in this command config")
-        if contact_plan_raw.shape != self._policy_contact_plan_raw.shape:
-            raise ValueError(
-                "Expected policy contact plan "
-                f"{tuple(self._policy_contact_plan_raw.shape)}, got {tuple(contact_plan_raw.shape)}"
-            )
-        self._policy_contact_plan_raw.copy_(contact_plan_raw.detach().to(self.device, dtype=torch.float32))
-
-    def reset_policy_contact_plan(self, env_ids: Tensor | slice | None = None) -> None:
-        """Restore a zero residual, i.e. the reference contact schedule."""
-        if env_ids is None:
-            env_ids = slice(None)
-        self._policy_contact_plan_raw[env_ids] = 0.0
-        self._contact_plan_mpc[env_ids] = 0.0
-
     def _interpolate_traj_refs(self) -> None:
         """Interpolate current references from stored MPC trajectories."""
         N = self.cfg.mpc_horizon
@@ -308,48 +177,6 @@ class LocoMPCCommand(CommandTerm):
         self._com_vel_mpc_target = (1 - alpha) * self._vel_traj[:, idx]  + alpha * self._vel_traj[:, idx + 1]
         self._k_mpc_target       = (1 - alpha) * self._k_traj[:, idx]    + alpha * self._k_traj[:, idx + 1]
         self._k_dot_mpc_target   = (1 - alpha) * self._kdot_traj[:, idx] + alpha * self._kdot_traj[:, idx + 1]
-        self._u_mpc_target       = (1 - alpha) * self._u_traj[:, idx] + alpha * self._u_traj[:, idx + 1]
-        self._force_mpc_target = torch.stack([
-            self._u_mpc_target[:, 0:3], self._u_mpc_target[:, 6:9]
-        ], dim=1)
-        self._moment_mpc_target = torch.stack([
-            self._u_mpc_target[:, 3:6], self._u_mpc_target[:, 9:12]
-        ], dim=1)
-        self._contact_mpc_target = self._sigma_traj[:, idx]
-
-    def _parameter_features(self, x0: Tensor, x_ref: Tensor) -> Tensor:
-        """Build the fixed 29-D state/reference history feature for the adaptor."""
-        B = x0.shape[0]
-        contact = torch.zeros(B, 2, device=self.device, dtype=x0.dtype)
-        try:
-            sensor: ContactSensor = self._env.scene[self.cfg.grf_sensor_name]
-            if sensor.data.force is not None:
-                contact = (sensor.data.force.reshape(B, 2, 3).norm(dim=-1) > 20.0).to(x0.dtype)
-        except KeyError:
-            # The adaptor remains valid in tasks without an explicit foot sensor.
-            pass
-        reference = x_ref[:, 0]
-        feature = torch.cat([x0, reference, reference - x0, contact], dim=-1)
-        self._parameter_history = torch.cat([
-            self._parameter_history[:, 1:], feature.unsqueeze(1)
-        ], dim=1)
-        return self._parameter_history
-
-    def _infer_mpc_parameters(self, x0: Tensor, x_ref: Tensor) -> MPCParameters:
-        history = self._parameter_features(x0, x_ref)
-        if self.cfg.use_hierarchical_parameters:
-            return decode_parameters(
-                self._hierarchical_parameter_raw.to(dtype=x0.dtype), self.cfg.parameter_bounds
-            )
-        if self._parameter_net is None:
-            return nominal_parameters(self.num_envs, device=self.device, dtype=x0.dtype)
-        with torch.inference_mode():
-            raw = self._parameter_net(history)
-        if isinstance(raw, (tuple, list)):
-            raw = raw[0]
-        if not isinstance(raw, Tensor):
-            raise TypeError("parameter network must return a tensor [B, 16]")
-        return decode_parameters(raw.to(device=self.device, dtype=x0.dtype), self.cfg.parameter_bounds)
 
     def _update_command(self) -> None:
         """Solve the centroidal MPC and update the GRF reference."""
@@ -425,88 +252,31 @@ class LocoMPCCommand(CommandTerm):
         x_ref[:, :, 6] = 0.0
         x_ref[:, :, 7] = 0.0
         x_ref[:, :, 8] = (I_zz * wz).unsqueeze(1)
-        reference_contacts: Tensor | None = None
-        reference_contact_state: Tensor | None = None
-        reference_contact_valid: Tensor | None = None
 
-        if cfg.motion_command_name is not None:
-            motion = self._env.command_manager.get_term(cfg.motion_command_name)
-            if motion is None or not hasattr(motion, "centroidal_horizon"):
-                raise ValueError(
-                    f"motion_command_name={cfg.motion_command_name!r} must provide centroidal_horizon(steps, dt)"
-                )
-            if hasattr(motion, "reference_centroidal_horizon"):
-                reference = motion.reference_centroidal_horizon(N + 1, dt)
-                x_ref[:, :, 0:3] = reference.com_pos_w
-                x_ref[:, :, 3:6] = reference.linear_momentum_w
-                x_ref[:, :, 6:9] = reference.angular_momentum_w
-                ref_vel = reference.com_vel_w
-                reference_contacts = reference.contact_pos_w[:, :N]
-                reference_contact_state = motion.reference_contact_horizon(N, dt)
-                reference_contact_valid = motion.reference_horizon_valid(N, dt)
-            else:
-                ref_pos, ref_vel, ref_ang = motion.centroidal_horizon(N + 1, dt)
-                x_ref[:, :, 0:3] = ref_pos
-                x_ref[:, :, 3:6] = ref_vel * cfg.mass
-                x_ref[:, :, 6:9] = ref_ang @ self._I_approx
-            # Contact scheduling still needs a current world-frame velocity.
-            vx, vy = ref_vel[:, 0, 0], ref_vel[:, 0, 1]
-
-        parameters = self._infer_mpc_parameters(x0, x_ref)
-        self._mpc_parameters = parameters
-        # Momentum corrections are reference residuals, never direct state
-        # estimates.  A horizon ramp avoids an artificial jump at x_0.
-        momentum_ramp = torch.linspace(0.0, 1.0, N + 1, device=device, dtype=x_ref.dtype)
-        x_ref[:, :, 3:9] += momentum_ramp.view(1, -1, 1) * parameters.momentum_residual.unsqueeze(1)
-
-        if cfg.use_reference_contact_schedule:
-            if reference_contacts is None or reference_contact_state is None:
-                raise ValueError(
-                    "use_reference_contact_schedule requires a MotionReferenceCommand "
-                    "with two configured contact bodies"
-                )
-            if reference_contacts.shape[2] != 2 or reference_contact_state.shape[2] != 2:
-                raise ValueError("The bipedal centroidal MPC requires exactly [left, right] reference contacts")
-            schedule = make_reference_contact_schedule(
-                B=B,
-                N=N,
-                reference_contact_state=reference_contact_state,
-                reference_r_LF=reference_contacts[:, :, 0],
-                reference_r_RF=reference_contacts[:, :, 1],
-                R_LF_rot=R_lf,
-                R_RF_rot=R_rf,
-                policy_contact_plan_residual=(
-                    self._policy_contact_plan_raw if cfg.use_policy_contact_plan else None
-                ),
-                policy_contact_plan_residual_scale=cfg.policy_contact_plan_residual_scale,
-                preserve_nominal_support=cfg.preserve_nominal_support,
-                device=device,
-            )
-        else:
-            gait_phase = getattr(
-                self._env, "_gait_phase", torch.zeros(B, device=device)
-            )
-            v_cmd_3d = torch.zeros(B, 3, device=device)
-            v_cmd_3d[:, 0] = vx
-            v_cmd_3d[:, 1] = vy
-            schedule = make_walking_schedule(
-                B=B,
-                N=N,
-                r_LF=r_lf,
-                r_RF=r_rf,
-                gait_phase=gait_phase,
-                period=cfg.gait_period,
-                dt=dt,
-                duty_factor=cfg.duty_factor,
-                com_pos=c,
-                v_cmd=v_cmd_3d,
-                yaw=yaw,
-                yaw_rate=wz,
-                hip_width=cfg.hip_width,
-                R_LF_rot=R_lf,
-                R_RF_rot=R_rf,
-                device=device,
-            )
+        gait_phase = getattr(
+            self._env, "_gait_phase", torch.zeros(B, device=device)
+        )
+        v_cmd_3d = torch.zeros(B, 3, device=device)
+        v_cmd_3d[:, 0] = vx
+        v_cmd_3d[:, 1] = vy
+        schedule = make_walking_schedule(
+            B=B,
+            N=N,
+            r_LF=r_lf,
+            r_RF=r_rf,
+            gait_phase=gait_phase,
+            period=cfg.gait_period,
+            dt=dt,
+            duty_factor=cfg.duty_factor,
+            com_pos=c,
+            v_cmd=v_cmd_3d,
+            yaw=yaw,
+            yaw_rate=wz,
+            hip_width=cfg.hip_width,
+            R_LF_rot=R_lf,
+            R_RF_rot=R_rf,
+            device=device,
+        )
 
         u_ref = torch.zeros(B, N, 12, device=device)
 
@@ -535,13 +305,6 @@ class LocoMPCCommand(CommandTerm):
         k_pred = x_pred[:, :, 6:9]
         self._k_traj = k_pred
         self._kdot_traj = torch.zeros_like(k_pred)
-        self._u_traj = mpc_out.u_pred.detach()
-        self._sigma_traj = schedule.sigma[:, :, :2].detach()
-        self._contact_plan_mpc.copy_(self._sigma_traj)
-        if reference_contact_valid is None:
-            self._contact_plan_valid.fill_(True)
-        else:
-            self._contact_plan_valid.copy_(reference_contact_valid)
         if N >= 2:
             self._kdot_traj[:, :-1] = (k_pred[:, 1:] - k_pred[:, :-1]) / cfg.mpc_dt
             self._kdot_traj[:, -1] = self._kdot_traj[:, -2]
@@ -700,21 +463,10 @@ class LocoMPCCommand(CommandTerm):
         self._vel_traj[env_ids]            = 0.0
         self._k_traj[env_ids]              = 0.0
         self._kdot_traj[env_ids]           = 0.0
-        self._u_traj[env_ids]              = 0.0
-        self._sigma_traj[env_ids]          = 0.0
-        self._contact_plan_valid[env_ids]  = False
         self._com_mpc_target[env_ids]      = 0.0
         self._com_vel_mpc_target[env_ids]  = 0.0
         self._k_mpc_target[env_ids]        = 0.0
         self._k_dot_mpc_target[env_ids]    = 0.0
-        self._u_mpc_target[env_ids]        = 0.0
-        self._force_mpc_target[env_ids]    = 0.0
-        self._moment_mpc_target[env_ids]   = 0.0
-        self._contact_mpc_target[env_ids]  = 0.0
-        self._parameter_history[env_ids]   = 0.0
-        self.reset_hierarchical_parameters(env_ids)
-        self.reset_policy_contact_state(env_ids)
-        self.reset_policy_contact_plan(env_ids)
         self._vis_ang_mom[env_ids]         = 0.0
         self._mpc.reset(env_ids)
 
@@ -723,240 +475,22 @@ def mpc_grf_tracking(
     command_name: str = "loco_mpc",
     grf_sensor_name: str = "feet_ground_contact",
 ) -> Tensor:
-    """Stance-gated force-landmark tracking error.
-
-    The landmark is the time-interpolated MPC force trajectory, not the first
-    control alone.  A regular contact sensor measures force only; it must not
-    be used to compare the MPC contact moments.
-    """
+    """GRF tracking error vs. MPC reference — use with weight = 0.0."""
     term = env.command_manager.get_term(command_name)
     if term is None or not isinstance(term, LocoMPCCommand):
         return torch.zeros(env.num_envs, device=env.device)
 
-    grf_ref: Tensor = term._force_mpc_target
+    grf_ref: Tensor = term._grf_ref
 
     sensor: ContactSensor = env.scene[grf_sensor_name]
     if sensor.data.force is None:
         return torch.zeros(env.num_envs, device=env.device)
 
-    force = sensor.data.force.reshape(env.num_envs, 2, 3)
-    active = term._contact_mpc_target.unsqueeze(-1)
-    sq_err = ((force - grf_ref).square() * active).sum(dim=(1, 2))
-    count = (active.sum(dim=(1, 2)) * 3.0).clamp_min(1.0)
-    rms_err = (sq_err / count).sqrt()
+    force = sensor.data.force
+    grf_actual = force.reshape(env.num_envs, 6)
+
+    rms_err = (grf_actual - grf_ref).pow(2).mean(dim=-1).sqrt()
     return -rms_err
-
-
-def mpc_contact_force_ref(
-    env: "ManagerBasedRlEnv",
-    command_name: str = "loco_mpc",
-) -> Tensor:
-    """Expose the interpolated MPC contact-force landmark ``[f_L, f_R]``."""
-    term = env.command_manager.get_term(command_name)
-    if term is None or not isinstance(term, LocoMPCCommand):
-        return torch.zeros(env.num_envs, 6, device=env.device)
-    return term._force_mpc_target.reshape(env.num_envs, 6)
-
-
-def mpc_contact_moment_ref(
-    env: "ManagerBasedRlEnv",
-    command_name: str = "loco_mpc",
-) -> Tensor:
-    """Expose the MPC contact-moment landmark ``[tau_L, tau_R]``.
-
-    This is a critic/reference signal.  Rewarding it requires a six-axis
-    force/torque sensor (or a valid pressure/CoP reconstruction), not the
-    three-axis net-force contact sensor used by the default THEMIS scene.
-    """
-    term = env.command_manager.get_term(command_name)
-    if term is None or not isinstance(term, LocoMPCCommand):
-        return torch.zeros(env.num_envs, 6, device=env.device)
-    return term._moment_mpc_target.reshape(env.num_envs, 6)
-
-
-def mpc_hierarchical_parameter_state(
-    env: "ManagerBasedRlEnv",
-    command_name: str = "loco_mpc",
-) -> Tensor:
-    """Expose the decoded, held MPC parameters to actor and critic.
-
-    Layout is ``[phase_rate, duty_offset, touchdown_mean_xy(4),
-    touchdown_std_xy(4), momentum_residual(6)]``.  This makes the low-level
-    policy Markov with respect to the high-level action that is held between
-    macro updates.
-    """
-    term = env.command_manager.get_term(command_name)
-    if term is None or not isinstance(term, LocoMPCCommand):
-        return torch.zeros(env.num_envs, 16, device=env.device)
-    p = term._mpc_parameters
-    return torch.cat([
-        p.phase_rate_scale.unsqueeze(-1),
-        p.duty_factor_offset.unsqueeze(-1),
-        p.touchdown_mean_residual[:, :, :2].reshape(env.num_envs, 4),
-        p.touchdown_std_xy.reshape(env.num_envs, 4),
-        p.momentum_residual,
-    ], dim=-1)
-
-
-def hierarchical_mpc_parameter_l2(
-    env: "ManagerBasedRlEnv",
-    action_name: str = "hybrid_mimic",
-) -> Tensor:
-    """Small regularizer on the held high-level action, not MPC output force."""
-    action = env.action_manager.get_term(action_name)
-    if not hasattr(action, "held_high_level_action"):
-        return torch.zeros(env.num_envs, device=env.device)
-    return action.held_high_level_action.square().mean(dim=-1)
-
-
-def policy_contact_state_tracking(
-    env: "ManagerBasedRlEnv",
-    action_name: str = "hybrid_mimic",
-    sensor_name: str = "feet_ground_contact",
-    std: float = 0.25,
-) -> Tensor:
-    """Reward continuous policy contact state matching actual foot contact.
-
-    The action is an *intent* used to construct the MPC schedule.  MuJoCo's
-    contact sensor supplies the physical label, so a policy cannot obtain
-    reward merely by declaring a fictitious support contact.
-    """
-    action = env.action_manager.get_term(action_name)
-    if not hasattr(action, "contact_state"):
-        return torch.zeros(env.num_envs, device=env.device)
-    sensor: ContactSensor = env.scene[sensor_name]
-    if sensor.data.found is None:
-        return torch.zeros(env.num_envs, device=env.device)
-    actual = (sensor.data.found > 0).to(action.contact_state.dtype)
-    if actual.ndim > 2:
-        actual = actual.any(dim=-1).to(action.contact_state.dtype)
-    if actual.shape != action.contact_state.shape:
-        raise ValueError(
-            f"Contact sensor {sensor_name!r} has shape {tuple(actual.shape)}; "
-            f"expected {tuple(action.contact_state.shape)}"
-        )
-    error = (action.contact_state - actual).square().mean(dim=-1)
-    return torch.exp(-error / std**2)
-
-
-def policy_contact_state(
-    env: "ManagerBasedRlEnv",
-    action_name: str = "hybrid_mimic",
-) -> Tensor:
-    """Expose fast policy contact-intention actions to actor and critic."""
-    action = env.action_manager.get_term(action_name)
-    if not hasattr(action, "contact_state"):
-        return torch.zeros(env.num_envs, 2, device=env.device)
-    return action.contact_state
-
-
-def mpc_contact_plan_ref(
-    env: "ManagerBasedRlEnv",
-    command_name: str = "loco_mpc",
-) -> Tensor:
-    """Expose the frozen full-horizon MPC contact plan ``[B, 2N]``."""
-    term = env.command_manager.get_term(command_name)
-    if term is None or not isinstance(term, LocoMPCCommand):
-        return torch.zeros(env.num_envs, 2, device=env.device)
-    return term._contact_plan_mpc.reshape(env.num_envs, -1)
-
-
-def mpc_contact_plan_valid(
-    env: "ManagerBasedRlEnv",
-    command_name: str = "loco_mpc",
-) -> Tensor:
-    """Expose the valid-stage mask of a non-looping contact-plan landmark."""
-    term = env.command_manager.get_term(command_name)
-    if term is None or not isinstance(term, LocoMPCCommand):
-        return torch.zeros(env.num_envs, 1, device=env.device)
-    return term._contact_plan_valid.to(dtype=torch.float32)
-
-
-class FutureContactPlanTracking:
-    """Delayed contact-plan landmark reward for the full-preview teacher.
-
-    A plan emitted at time ``t`` is stored and its ``k``-th horizon element is
-    compared with the filtered physical contact observed at ``t+k``.  Since
-    MPC replans at later times this is a prediction-consistency auxiliary
-    reward, not a causal claim that the old far-horizon plan alone created the
-    contact.
-    """
-
-    def __init__(self, cfg: "RewardTermCfg", env: "ManagerBasedRlEnv") -> None:  # noqa: F821
-        command_name = cfg.params.get("command_name", "loco_mpc")
-        term = env.command_manager.get_term(command_name)
-        if term is None or not isinstance(term, LocoMPCCommand):
-            raise TypeError(f"{command_name!r} must be a LocoMPCCommand")
-        self._horizon = term.cfg.mpc_horizon
-        self._history = torch.zeros(
-            self._horizon, env.num_envs, self._horizon, 2, device=env.device
-        )
-        self._valid = torch.zeros(
-            self._horizon, env.num_envs, self._horizon, dtype=torch.bool, device=env.device
-        )
-        self._filtered_contact = torch.zeros(env.num_envs, 2, dtype=torch.bool, device=env.device)
-        self._cursor = 0
-
-    def __call__(
-        self,
-        env: "ManagerBasedRlEnv",
-        command_name: str = "loco_mpc",
-        sensor_name: str = "feet_ground_contact",
-        std: float = 0.25,
-        horizon_discount: float = 0.9,
-        force_on_threshold: float = 20.0,
-        force_off_threshold: float = 10.0,
-    ) -> Tensor:
-        if std <= 0.0:
-            raise ValueError("std must be positive")
-        if not 0.0 < horizon_discount <= 1.0:
-            raise ValueError("horizon_discount must lie in (0, 1]")
-        term = env.command_manager.get_term(command_name)
-        if term is None or not isinstance(term, LocoMPCCommand):
-            return torch.zeros(env.num_envs, device=env.device)
-        sensor: ContactSensor = env.scene[sensor_name]
-        if sensor.data.found is None:
-            return torch.zeros(env.num_envs, device=env.device)
-        found = sensor.data.found
-        if found.ndim > 2:
-            found = found.any(dim=-1)
-        found = found.to(torch.bool)
-        if found.shape != self._filtered_contact.shape:
-            raise ValueError(
-                f"Contact sensor {sensor_name!r} has shape {tuple(found.shape)}; "
-                f"expected {tuple(self._filtered_contact.shape)}"
-            )
-        if sensor.data.force is None:
-            physical = found
-        else:
-            force = sensor.data.force.reshape(env.num_envs, 2, 3).norm(dim=-1)
-            threshold = torch.where(
-                self._filtered_contact,
-                torch.full_like(force, force_off_threshold),
-                torch.full_like(force, force_on_threshold),
-            )
-            physical = found & (force >= threshold)
-        self._filtered_contact.copy_(physical)
-
-        self._history[self._cursor].copy_(term._contact_plan_mpc)
-        self._valid[self._cursor].copy_(term._contact_plan_valid)
-        weighted_score = torch.zeros(env.num_envs, device=env.device)
-        weight_sum = torch.zeros(env.num_envs, device=env.device)
-        for age in range(self._horizon):
-            slot = (self._cursor - age) % self._horizon
-            valid = self._valid[slot, :, age]
-            prediction = self._history[slot, :, age]
-            score = torch.exp(-((prediction - physical.to(prediction.dtype)).square().mean(dim=-1)) / std**2)
-            weight = horizon_discount ** age
-            weighted_score += valid.to(score.dtype) * weight * score
-            weight_sum += valid.to(score.dtype) * weight
-        self._cursor = (self._cursor + 1) % self._horizon
-        return weighted_score / weight_sum.clamp_min(1.0)
-
-    def reset(self, env_ids: Tensor) -> None:
-        self._history[:, env_ids] = 0.0
-        self._valid[:, env_ids] = False
-        self._filtered_contact[env_ids] = False
 
 def mpc_com_ref(
     env: "ManagerBasedRlEnv",
@@ -1502,6 +1036,12 @@ class LocoManipMPCCommand(LocoMPCCommand):
             N=cfg.mpc_horizon,
             dt=cfg.mpc_dt,
             mass=cfg.mass,
+            foot_x_toe=cfg.foot_x_toe,
+            foot_x_heel=cfg.foot_x_heel,
+            foot_y_half=cfg.foot_y_half,
+            mu_foot=cfg.mu_foot,
+            mu_foot_yaw=cfg.mu_foot_yaw,
+            fz_max_foot=cfg.fz_max_foot,
             mu_hand=cfg.mu_hand,
             f_hand_max=cfg.f_hand_max,
             R_f_hand=cfg.R_f_hand,
@@ -1872,7 +1412,7 @@ def mpc_hand_force_tracking(
     sigma: float = 50.0,
 ) -> Tensor:
     """Reward the robot for tracking the MPC-optimal hand push forces."""
-    from jingchu01_training.push_box_mdp import _push_mask  # noqa: PLC0415
+    from themis_training.push_box_mdp import _push_mask  # noqa: PLC0415
 
     term = env.command_manager.get_term(command_name)
     if term is None or not hasattr(term, "_hand_ref"):

@@ -15,7 +15,10 @@ import numpy as np
 import torch
 from torch import Tensor
 
+# The paper-compatible velocity command stays untouched.  This module adds
+# only motion-derived centroidal references and their fixed contact schedule.
 from . import mpc_grf_mdp as baseline
+from g1_mpc.contact_schedule import make_reference_contact_schedule
 from training_common.reference_centroidal import (
   CentroidalState,
   ReferenceCentroidalTrajectory,
@@ -29,7 +32,9 @@ if TYPE_CHECKING:
 
 @dataclass(kw_only=True)
 class MimicLocoMPCCommandCfg(baseline.LocoMPCCommandCfg):
-  """Configuration that opts a task into the mimic-only MPC extension."""
+  """Configuration for fixed-plan, reference-centroidal mimic MPC."""
+
+  motion_command_name: str | None = None
 
   def build(self, env: "ManagerBasedRlEnv") -> "MimicLocoMPCCommand":
     return MimicLocoMPCCommand(self, env)
@@ -74,8 +79,10 @@ def apply_mimic_centroidal_reference_to_mpc_target(
 class MimicLocoMPCCommand(baseline.LocoMPCCommand):
   """CD-MPC command with motion-derived targets and exact online centroidal x0.
 
-  It subclasses the paper baseline so the contact-plan action, QP construction,
-  solver, rollout storage, and all non-mimic public APIs remain identical.
+  This is deliberately parameter-free: it consumes only the retargeted
+  reference centroidal trajectory and its fixed contact plan.  Learned MPC
+  parameters and policy contact-plan residuals live in
+  :mod:`g1_training.mpc_grf_parameterized_mdp`.
   """
 
   cfg: MimicLocoMPCCommandCfg
@@ -96,6 +103,15 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
     self._online_body_inertial_quat_b = model_field("body_iquat")
     self._linear_momentum_traj = torch.zeros_like(self._vel_traj)
     self._linear_momentum_mpc_target = torch.zeros_like(self._com_mpc_target)
+    B, N = env.num_envs, cfg.mpc_horizon
+    self._u_traj = torch.zeros(B, N, 12, device=env.device)
+    self._sigma_traj = torch.zeros(B, N, 2, device=env.device)
+    self._u_mpc_target = torch.zeros(B, 12, device=env.device)
+    self._force_mpc_target = torch.zeros(B, 2, 3, device=env.device)
+    self._moment_mpc_target = torch.zeros(B, 2, 3, device=env.device)
+    self._contact_mpc_target = torch.zeros(B, 2, device=env.device)
+    self._contact_plan_mpc = torch.zeros(B, N, 2, device=env.device)
+    self._contact_plan_valid = torch.ones(B, N, dtype=torch.bool, device=env.device)
 
   def current_centroidal_state(self) -> CentroidalState:
     """Read the exact whole-body centroidal state in simulator-world axes."""
@@ -122,11 +138,44 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
       (1.0 - alpha) * self._linear_momentum_traj[:, idx]
       + alpha * self._linear_momentum_traj[:, idx + 1]
     )
+    self._u_mpc_target = (
+      (1.0 - alpha) * self._u_traj[:, idx] + alpha * self._u_traj[:, idx + 1]
+    )
+    self._force_mpc_target = torch.stack(
+      [self._u_mpc_target[:, 0:3], self._u_mpc_target[:, 6:9]], dim=1
+    )
+    self._moment_mpc_target = torch.stack(
+      [self._u_mpc_target[:, 3:6], self._u_mpc_target[:, 9:12]], dim=1
+    )
+    self._contact_mpc_target = self._sigma_traj[:, idx]
 
   def _resample_command(self, env_ids: Tensor) -> None:
     super()._resample_command(env_ids)
     self._linear_momentum_traj[env_ids] = 0.0
     self._linear_momentum_mpc_target[env_ids] = 0.0
+    self._u_traj[env_ids] = 0.0
+    self._sigma_traj[env_ids] = 0.0
+    self._u_mpc_target[env_ids] = 0.0
+    self._force_mpc_target[env_ids] = 0.0
+    self._moment_mpc_target[env_ids] = 0.0
+    self._contact_mpc_target[env_ids] = 0.0
+    self._contact_plan_mpc[env_ids] = 0.0
+    self._contact_plan_valid[env_ids] = False
+
+  def _parameterize_reference(self, x0: Tensor, x_ref: Tensor) -> Tensor:
+    """Pure mimic hook: preserve the reference state exactly."""
+    return x_ref
+
+  def _make_reference_schedule(
+    self, *, B: int, N: int, reference_contact_state: Tensor,
+    reference_contacts: Tensor, R_lf: Tensor, R_rf: Tensor,
+  ):
+    return make_reference_contact_schedule(
+      B=B, N=N, reference_contact_state=reference_contact_state,
+      reference_r_LF=reference_contacts[:, :, 0],
+      reference_r_RF=reference_contacts[:, :, 1],
+      R_LF_rot=R_lf, R_RF_rot=R_rf, device=self.device,
+    )
 
   def _update_command(self) -> None:
     """Solve the same QP as the baseline using exact mimic centroidal data."""
@@ -197,32 +246,15 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
         x_ref[:, :, 6:9] = ref_ang @ self._I_approx
       vx, vy = ref_vel[:, 0, 0], ref_vel[:, 0, 1]
 
-    parameters = self._infer_mpc_parameters(x0, x_ref)
-    self._mpc_parameters = parameters
-    ramp = torch.linspace(0.0, 1.0, N + 1, device=device, dtype=x_ref.dtype)
-    x_ref[:, :, 3:9] += ramp.view(1, -1, 1) * parameters.momentum_residual.unsqueeze(1)
-    if cfg.use_reference_contact_schedule:
-      if reference_contacts is None or reference_contact_state is None:
-        raise ValueError("use_reference_contact_schedule requires a MotionReferenceCommand with two contact bodies")
-      if reference_contacts.shape[2] != 2 or reference_contact_state.shape[2] != 2:
-        raise ValueError("The bipedal centroidal MPC requires exactly [left, right] reference contacts")
-      schedule = baseline.make_reference_contact_schedule(
-        B=B, N=N, reference_contact_state=reference_contact_state,
-        reference_r_LF=reference_contacts[:, :, 0], reference_r_RF=reference_contacts[:, :, 1],
-        R_LF_rot=R_lf, R_RF_rot=R_rf,
-        policy_contact_plan_residual=(self._policy_contact_plan_raw if cfg.use_policy_contact_plan else None),
-        policy_contact_plan_residual_scale=cfg.policy_contact_plan_residual_scale,
-        preserve_nominal_support=cfg.preserve_nominal_support, device=device,
-      )
-    else:
-      phase = getattr(self._env, "_gait_phase", torch.zeros(B, device=device))
-      v_cmd = torch.zeros(B, 3, device=device)
-      v_cmd[:, 0], v_cmd[:, 1] = vx, vy
-      schedule = baseline.make_walking_schedule(
-        B=B, N=N, r_LF=r_lf, r_RF=r_rf, gait_phase=phase, period=cfg.gait_period, dt=dt,
-        duty_factor=cfg.duty_factor, com_pos=c, v_cmd=v_cmd, yaw=yaw, yaw_rate=wz, hip_width=cfg.hip_width,
-        R_LF_rot=R_lf, R_RF_rot=R_rf, device=device,
-      )
+    if reference_contacts is None or reference_contact_state is None:
+      raise ValueError("Mimic MPC requires a MotionReferenceCommand with a two-foot contact schedule")
+    if reference_contacts.shape[2] != 2 or reference_contact_state.shape[2] != 2:
+      raise ValueError("The bipedal centroidal MPC requires exactly [left, right] reference contacts")
+    x_ref = self._parameterize_reference(x0, x_ref)
+    schedule = self._make_reference_schedule(
+      B=B, N=N, reference_contact_state=reference_contact_state,
+      reference_contacts=reference_contacts, R_lf=R_lf, R_rf=R_rf,
+    )
 
     mpc_in = baseline.MPCInput(
       x0=x0, schedule=schedule, x_ref=x_ref, u_ref=torch.zeros(B, N, 12, device=device),
@@ -300,6 +332,34 @@ class MpcExactCentroidalLandmarkTracking:
       + w_angular_momentum * (state.angular_momentum_w - term._k_mpc_target).square().sum(dim=-1)
     )
     return torch.exp(-loss)
+
+
+def mpc_contact_force_ref(env: "ManagerBasedRlEnv", command_name: str = "loco_mpc") -> Tensor:
+  term = env.command_manager.get_term(command_name)
+  if not isinstance(term, MimicLocoMPCCommand):
+    return torch.zeros(env.num_envs, 6, device=env.device)
+  return term._force_mpc_target.reshape(env.num_envs, 6)
+
+
+def mpc_contact_moment_ref(env: "ManagerBasedRlEnv", command_name: str = "loco_mpc") -> Tensor:
+  term = env.command_manager.get_term(command_name)
+  if not isinstance(term, MimicLocoMPCCommand):
+    return torch.zeros(env.num_envs, 6, device=env.device)
+  return term._moment_mpc_target.reshape(env.num_envs, 6)
+
+
+def mpc_contact_plan_ref(env: "ManagerBasedRlEnv", command_name: str = "loco_mpc") -> Tensor:
+  term = env.command_manager.get_term(command_name)
+  if not isinstance(term, MimicLocoMPCCommand):
+    return torch.zeros(env.num_envs, 2, device=env.device)
+  return term._contact_plan_mpc.reshape(env.num_envs, -1)
+
+
+def mpc_contact_plan_valid(env: "ManagerBasedRlEnv", command_name: str = "loco_mpc") -> Tensor:
+  term = env.command_manager.get_term(command_name)
+  if not isinstance(term, MimicLocoMPCCommand):
+    return torch.zeros(env.num_envs, 1, device=env.device)
+  return term._contact_plan_valid.to(dtype=torch.float32)
 
 
 def __getattr__(name: str):

@@ -206,3 +206,17 @@ JINGCHU01_CENTROIDAL_INERTIA_BODY: tuple[tuple[float, float, float], ...] = (
   (-0.000549, 7.616278, 0.000288),
   (0.285403, 0.000288, 1.642220),
 )
+
+# Rectangular CoP support approximation about ``*_foot_site``.  These values
+# are measured from the committed ankle-roll collision meshes: x in
+# [-0.1000, 0.1635] m and y in [-0.0500, 0.0500] m.  The contact mesh is not a
+# perfect sole polygon, therefore this remains an explicit conservative QP
+# modelling approximation rather than a quantity inferred at every reset.
+JINGCHU01_MPC_FOOT_X_TOE = 0.1635
+JINGCHU01_MPC_FOOT_X_HEEL = 0.1000
+JINGCHU01_MPC_FOOT_Y_HALF = 0.0500
+JINGCHU01_MPC_MU_FOOT = 0.6
+JINGCHU01_MPC_MU_FOOT_YAW = 0.1
+# A robot-local solver bound, to be calibrated against the allowed contact
+# force of the final hardware/controller; it is not an MJCF inertial value.
+JINGCHU01_MPC_FZ_MAX_FOOT = 800.0

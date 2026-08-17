@@ -8,15 +8,12 @@ from enum import IntEnum
 import torch
 from torch import Tensor
 
-
 class ContactID(IntEnum):
     """Index ordering for the four contact end-effectors."""
-
     LF = 0
     RF = 1
     LH = 2
     RH = 3
-
 
 @dataclass
 class ContactSchedule:
@@ -27,6 +24,7 @@ class ContactSchedule:
     r_RF: Tensor
     r_LH: Tensor
     r_RH: Tensor
+
     R_LF: Tensor | None = None
     R_RF: Tensor | None = None
 
@@ -41,7 +39,6 @@ class ContactSchedule:
     @property
     def horizon(self) -> int:
         return self.sigma.shape[1]
-
 
 def make_double_support_schedule(
     B: int,
@@ -90,7 +87,6 @@ def make_double_support_schedule(
         R_RF=_expand_rot(R_RF_rot),
     )
 
-
 def make_walking_schedule(
     B: int,
     N: int,
@@ -100,13 +96,13 @@ def make_walking_schedule(
     period: float = 0.7,
     dt: float = 0.05,
     duty_factor: float = 0.5,
-    com_pos: Tensor | None = None,
-    v_cmd: Tensor | None = None,
-    yaw: Tensor | None = None,
-    yaw_rate: Tensor | None = None,
+    com_pos: "Tensor | None" = None,
+    v_cmd: "Tensor | None" = None,
+    yaw: "Tensor | None" = None,
+    yaw_rate: "Tensor | None" = None,
     hip_width: float = 0.1,
-    R_LF_rot: Tensor | None = None,
-    R_RF_rot: Tensor | None = None,
+    R_LF_rot: "Tensor | None" = None,
+    R_RF_rot: "Tensor | None" = None,
     device: torch.device | str = "cpu",
     dtype: torch.dtype = torch.float32,
 ) -> ContactSchedule:
@@ -115,12 +111,15 @@ def make_walking_schedule(
 
     r_LF = r_LF.to(device=device, dtype=dtype)
     r_RF = r_RF.to(device=device, dtype=dtype)
+
     phase_rate = 2.0 * math.pi / period
     k_steps = torch.arange(N, device=device, dtype=dtype).unsqueeze(0)
     phase_traj = gait_phase.unsqueeze(1) + phase_rate * dt * k_steps
+
     threshold = math.cos(math.pi * duty_factor)
     rf_stance = phase_traj.sin() < threshold
     lf_stance = (phase_traj + math.pi).sin() < threshold
+
     sigma = torch.zeros(B, N, 4, device=device, dtype=dtype)
     sigma[:, :, ContactID.LF] = lf_stance.to(dtype)
     sigma[:, :, ContactID.RF] = rf_stance.to(dtype)
@@ -128,45 +127,71 @@ def make_walking_schedule(
     if com_pos is not None and v_cmd is not None:
         v_cmd = v_cmd.to(device=device, dtype=dtype)
         com_pos = com_pos.to(device=device, dtype=dtype)
+
         stride_time = period / 2.0
-        wz_t = yaw_rate.to(device=device, dtype=dtype) if yaw_rate is not None else torch.zeros(B, device=device, dtype=dtype)
-        yaw_t = yaw.to(device=device, dtype=dtype) if yaw is not None else torch.zeros(B, device=device, dtype=dtype)
-        cos_y0, sin_y0 = yaw_t.cos(), yaw_t.sin()
-        vx_body = cos_y0 * v_cmd[:, 0] + sin_y0 * v_cmd[:, 1]
-        vy_body = -sin_y0 * v_cmd[:, 0] + cos_y0 * v_cmd[:, 1]
-        k_idx = torch.arange(N, device=device, dtype=dtype)
-        yaw_k = yaw_t.unsqueeze(1) + wz_t.unsqueeze(1) * k_idx * dt
-        cos_k, sin_k = yaw_k.cos(), yaw_k.sin()
-        vx_k = cos_k * vx_body.unsqueeze(1) - sin_k * vy_body.unsqueeze(1)
-        vy_k = sin_k * vx_body.unsqueeze(1) + cos_k * vy_body.unsqueeze(1)
+
+        wz_t = (yaw_rate.to(device=device, dtype=dtype)
+                if yaw_rate is not None
+                else torch.zeros(B, device=device, dtype=dtype))
+        yaw_t = (yaw.to(device=device, dtype=dtype)
+                 if yaw is not None
+                 else torch.zeros(B, device=device, dtype=dtype))
+
+        cos_y0 = yaw_t.cos(); sin_y0 = yaw_t.sin()
+        vx_body = ( cos_y0 * v_cmd[:, 0] + sin_y0 * v_cmd[:, 1])
+        vy_body = (-sin_y0 * v_cmd[:, 0] + cos_y0 * v_cmd[:, 1])
+
+        k_idx   = torch.arange(N, device=device, dtype=dtype)
+        yaw_k   = yaw_t.unsqueeze(1) + wz_t.unsqueeze(1) * k_idx * dt
+        cos_k   = yaw_k.cos()
+        sin_k   = yaw_k.sin()
+
+        vx_k = (cos_k * vx_body.unsqueeze(1) - sin_k * vy_body.unsqueeze(1))
+        vy_k = (sin_k * vx_body.unsqueeze(1) + cos_k * vy_body.unsqueeze(1))
+
         com_arc = torch.zeros(B, N, 3, device=device, dtype=dtype)
         com_arc[:, :, 0] = com_pos[:, 0:1] + torch.cumsum(vx_k * dt, dim=1)
         com_arc[:, :, 1] = com_pos[:, 1:2] + torch.cumsum(vy_k * dt, dim=1)
         com_arc[:, :, 2] = com_pos[:, 2:3].expand(B, N)
 
         def _foot_traj(r_f0: Tensor, stance_mask: Tensor, sign_y: float) -> Tensor:
+            """Propagate foot position; apply Raibert heuristic at touchdowns."""
             traj = torch.zeros(B, N, 3, device=device, dtype=dtype)
-            r_cur, r_f0_z = r_f0.clone(), r_f0[:, 2].clamp(min=0.0)
+            r_cur = r_f0.clone()
+            r_f0_z = r_f0[:, 2].clamp(min=0.0)
+
             for k in range(N):
                 is_stance = stance_mask[:, k]
-                new_stance = is_stance & (~stance_mask[:, k - 1]) if k > 0 else torch.zeros(B, device=device, dtype=torch.bool)
+                new_stance = (
+                    is_stance & (~stance_mask[:, k - 1])
+                    if k > 0
+                    else torch.zeros(B, device=device, dtype=torch.bool)
+                )
+
                 if new_stance.any():
                     hip_x = sign_y * (-sin_k[:, k]) * hip_width
-                    hip_y = sign_y * cos_k[:, k] * hip_width
-                    p_new = torch.stack((com_arc[:, k, 0] + vx_k[:, k] * 0.5 * stride_time + hip_x,
-                                         com_arc[:, k, 1] + vy_k[:, k] * 0.5 * stride_time + hip_y,
-                                         r_f0_z), dim=-1)
+                    hip_y = sign_y * ( cos_k[:, k]) * hip_width
+
+                    p_new_x = (com_arc[:, k, 0]
+                                + vx_k[:, k] * 0.5 * stride_time
+                                + hip_x)
+                    p_new_y = (com_arc[:, k, 1]
+                                + vy_k[:, k] * 0.5 * stride_time
+                                + hip_y)
+                    p_new = torch.stack([p_new_x, p_new_y, r_f0_z], dim=-1)
                     r_cur = torch.where(new_stance.unsqueeze(-1), p_new, r_cur)
-                traj[:, k] = r_cur
+
+                traj[:, k, :] = r_cur
+
             return traj
 
-        r_LF_traj = _foot_traj(r_LF, lf_stance, +1.0)
-        r_RF_traj = _foot_traj(r_RF, rf_stance, -1.0)
+        r_LF_traj = _foot_traj(r_LF, lf_stance, sign_y=+1.0)
+        r_RF_traj = _foot_traj(r_RF, rf_stance, sign_y=-1.0)
     else:
         r_LF_traj = r_LF.unsqueeze(1).expand(B, N, 3).contiguous()
         r_RF_traj = r_RF.unsqueeze(1).expand(B, N, 3).contiguous()
 
-    def _expand_rot(R: Tensor | None) -> Tensor | None:
+    def _expand_rot(R: "Tensor | None") -> "Tensor | None":
         if R is None:
             return None
         R = R.to(device=device, dtype=dtype)

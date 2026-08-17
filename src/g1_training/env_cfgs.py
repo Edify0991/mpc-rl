@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from dataclasses import fields
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
@@ -24,8 +25,8 @@ from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from . import hybrid_mimic, mimic_mdp
 from . import mpc_grf_mimic_mdp as g1_mpc_mimic_mdp
+from . import mpc_grf_parameterized_mdp as g1_mpc_parameterized_mdp
 from . import mpc_grf_mdp as g1_mpc_grf_mdp
-from training_common.mpc_locomotion_features import apply_mpc_grf_features, apply_mpc_grf_v2_features
 from .g1.g1_constants import (
   DAMPING,
   G1_ACTION_SCALE,
@@ -58,6 +59,81 @@ G1_FOOT_BODIES = ("left_ankle_roll_link", "right_ankle_roll_link")
 G1_FOOT_GEOMS = tuple(
   f"{side}_foot{i}_collision" for side in ("left", "right") for i in range(1, 8)
 )
+
+
+def _apply_g1_mpc_grf_features(
+  cfg: ManagerBasedRlEnvCfg, *, command_cfg: G1LocoMPCCommandCfg,
+) -> ManagerBasedRlEnvCfg:
+  """Install the paper-compatible G1 CD-MPC rewards and critic landmarks."""
+  cfg.commands["loco_mpc"] = command_cfg
+  cfg.rewards["mpc_grf_tracking"] = RewardTermCfg(
+    func=g1_mpc_grf_mdp.mpc_grf_tracking, weight=0.0,
+    params={"command_name": "loco_mpc", "grf_sensor_name": "feet_ground_contact"},
+  )
+  cfg.rewards.pop("angular_momentum", None)
+  cfg.rewards["mpc_ang_mom"] = RewardTermCfg(
+    func=g1_mpc_grf_mdp.MpcAngMomTracking, weight=0.05,
+    params={"command_name": "loco_mpc", "w_k": 1.0, "w_kdot": 0.01,
+            "q_k": (1.0, 1.0, 0.5), "q_kdot": (0.1, 0.1, 0.05)},
+  )
+  cfg.rewards["mpc_com_tracking"] = RewardTermCfg(
+    func=g1_mpc_grf_mdp.mpc_com_tracking, weight=1.0,
+    params={"command_name": "loco_mpc", "w_pos": 1.0, "w_vel": 0.5},
+  )
+  cfg.rewards["foot_flat_orientation"] = RewardTermCfg(
+    func=g1_mpc_grf_mdp.foot_flat_orientation, weight=0.3,
+    params={"asset_cfg": SceneEntityCfg("robot", site_names=G1_FOOT_SITES), "sigma": 0.15},
+  )
+  for name, func in (
+    ("mpc_com_ref", g1_mpc_grf_mdp.mpc_com_ref),
+    ("mpc_k_ref", g1_mpc_grf_mdp.mpc_ang_mom_ref),
+  ):
+    cfg.observations["critic"].terms[name] = ObservationTermCfg(
+      func=func, params={"command_name": "loco_mpc"},
+    )
+  return cfg
+
+
+def _apply_g1_mpc_grf_v2_features(cfg: ManagerBasedRlEnvCfg) -> ManagerBasedRlEnvCfg:
+  """Apply the paper's MPC-primary V2 reward weights to the G1 task."""
+  for name in ("track_linear_velocity", "track_angular_velocity", "body_ang_vel", "air_time", "foot_slip"):
+    cfg.rewards.pop(name, None)
+  cfg.rewards["mpc_com_tracking"].weight = 2.0
+  cfg.rewards["mpc_com_tracking"].params.update({
+    "w_pos": 1.0, "w_vel": 0.0,
+    "lookahead_fracs": (0.0, 0.25, 0.5, 0.75, 1.0),
+    "lookahead_weights": (0.5, 0.25, 0.15, 0.07, 0.03),
+  })
+  landmark_params = {
+    "command_name": "loco_mpc",
+    "lookahead_fracs": (0.0, 0.25, 0.5, 0.75, 1.0),
+    "lookahead_weights": (0.5, 0.25, 0.15, 0.07, 0.03),
+  }
+  cfg.rewards["mpc_com_vel_tracking"] = RewardTermCfg(
+    func=g1_mpc_grf_mdp.mpc_com_vel_tracking, weight=2.0,
+    params=landmark_params | {"w_vel": 4.0},
+  )
+  cfg.rewards["mpc_ang_vel_tracking"] = RewardTermCfg(
+    func=g1_mpc_grf_mdp.mpc_ang_vel_tracking, weight=4.0,
+    params=landmark_params | {"w_ang": 2.0},
+  )
+  cfg.rewards["mpc_ang_mom"].weight = 0.05
+  cfg.rewards["mpc_ang_mom"].params.update({
+    "q_k": (1.0, 1.0, 1.0),
+    "lookahead_fracs": landmark_params["lookahead_fracs"],
+    "lookahead_weights": landmark_params["lookahead_weights"],
+  })
+  cfg.rewards["mpc_grf_tracking"].weight = 0.002
+  cfg.rewards["foot_flat_orientation"].weight = 1.0
+  cfg.rewards["mpc_foot_placement"] = RewardTermCfg(
+    func=g1_mpc_grf_mdp.mpc_foot_placement_tracking, weight=1.0,
+    params={"command_name": "loco_mpc", "sigma": 0.2},
+  )
+  command = cfg.commands["loco_mpc"]
+  command.mpc_horizon = 10
+  command.run_every_n_steps = 5
+  command.solver_type = "jax_pimpc"
+  return cfg
 
 
 def _g1_mpc_foot_wrench_kwargs() -> dict[str, float]:
@@ -95,11 +171,8 @@ def g1_mpc_locomotion_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     gait_period=0.9, duty_factor=0.5, vel_cmd_name="twist",
     grf_sensor_name="feet_ground_contact", run_every_n_steps=5,
   )
-  cfg = apply_mpc_grf_features(
-    g1_flat_env_cfg(play=play), command_cfg=command,
-    mpc_mdp=g1_mpc_grf_mdp, foot_sites=G1_FOOT_SITES,
-  )
-  return apply_mpc_grf_v2_features(cfg, mpc_mdp=g1_mpc_grf_mdp)
+  cfg = _apply_g1_mpc_grf_features(g1_flat_env_cfg(play=play), command_cfg=command)
+  return _apply_g1_mpc_grf_v2_features(cfg)
 
 
 def g1_mpc_loco_manipulation_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -327,13 +400,14 @@ def g1_mpc_rl_mimic_contact_env_cfg(
   motion.loop = False
   motion.random_start = not play
 
-  cfg.commands["loco_mpc"] = g1_mpc_mimic_mdp.as_mimic_loco_mpc_cfg(cfg.commands["loco_mpc"])
+  cfg.commands["loco_mpc"] = g1_mpc_parameterized_mdp.as_parameterized_mimic_loco_mpc_cfg(
+    g1_mpc_mimic_mdp.as_mimic_loco_mpc_cfg(cfg.commands["loco_mpc"])
+  )
   loco_mpc = cfg.commands["loco_mpc"]
-  assert isinstance(loco_mpc, MimicLocoMPCCommandCfg)
+  assert isinstance(loco_mpc, g1_mpc_parameterized_mdp.ParameterizedMimicLocoMPCCommandCfg)
   loco_mpc.mass = G1_TOTAL_MASS
   loco_mpc.inertia_body = G1_CENTROIDAL_INERTIA_BODY
   loco_mpc.motion_command_name = "motion"
-  loco_mpc.use_reference_contact_schedule = True
   loco_mpc.use_policy_contact_plan = True
   loco_mpc.policy_contact_plan_residual_scale = 0.75
   loco_mpc.run_every_n_steps = 1
@@ -401,13 +475,43 @@ def g1_mpc_rl_mimic_contact_env_cfg(
     func=hybrid_mimic.residual_action_l2, weight=-0.01, params={"action_name": "hybrid_mimic"}
   )
   cfg.rewards["future_contact_plan"] = RewardTermCfg(
-    func=g1_mpc_mimic_mdp.FutureContactPlanTracking,
+    func=g1_mpc_parameterized_mdp.FutureContactPlanTracking,
     weight=0.5,
     params={
       "command_name": "loco_mpc", "sensor_name": "feet_ground_contact", "std": 0.25,
       "horizon_discount": 0.9, "force_on_threshold": 20.0, "force_off_threshold": 10.0,
     },
   )
+  return cfg
+
+
+def g1_mpc_rl_mimic_reference_env_cfg(
+  play: bool = False,
+  motion_file: str | None = None,
+  centroidal_body_names: tuple[str, ...] | None = None,
+) -> ManagerBasedRlEnvCfg:
+  """Parameter-free fixed-reference Mimic MPC validation task.
+
+  It retains reference centroidal/contact landmarks but removes every learned
+  contact-plan or MPC-parameter action.  This is the isolated control before
+  testing the parameterized extension.
+  """
+  cfg = g1_mpc_rl_mimic_contact_env_cfg(
+    play=play, motion_file=motion_file, centroidal_body_names=centroidal_body_names
+  )
+  current = cfg.commands["loco_mpc"]
+  cfg.commands["loco_mpc"] = MimicLocoMPCCommandCfg(
+    **{item.name: getattr(current, item.name) for item in fields(MimicLocoMPCCommandCfg)}
+  )
+  action = cfg.actions["hybrid_mimic"]
+  assert isinstance(action, HybridMimicActionCfg)
+  action.enable_contact_state_action = False
+  action.contact_plan_horizon = 1
+  action.hierarchical_mpc_parameters = False
+  cfg.rewards.pop("future_contact_plan", None)
+  cfg.rewards.pop("hierarchical_mpc_parameter", None)
+  for group in ("actor", "critic"):
+    cfg.observations[group].terms.pop("mpc_hierarchical_parameter_state", None)
   return cfg
 
 
@@ -454,7 +558,7 @@ def g1_hierarchical_hybrid_mimic_env_cfg(
   action.hierarchical_mpc_parameters = True
   action.high_level_decimation = 5
   loco_mpc = cfg.commands["loco_mpc"]
-  assert isinstance(loco_mpc, MimicLocoMPCCommandCfg)
+  assert isinstance(loco_mpc, g1_mpc_parameterized_mdp.ParameterizedMimicLocoMPCCommandCfg)
   loco_mpc.use_hierarchical_parameters = True
   # The high-level parameters are held for five low-level policy steps.  The
   # contact-plan residual remains horizon-valued and is sampled each step.
@@ -464,13 +568,13 @@ def g1_hierarchical_hybrid_mimic_env_cfg(
       ("mpc_com_ref", g1_mpc_mimic_mdp.mpc_com_ref),
       ("mpc_k_ref", g1_mpc_mimic_mdp.mpc_ang_mom_ref),
       ("mpc_contact_force_ref", g1_mpc_mimic_mdp.mpc_contact_force_ref),
-      ("mpc_hierarchical_parameter_state", g1_mpc_mimic_mdp.mpc_hierarchical_parameter_state),
+      ("mpc_hierarchical_parameter_state", g1_mpc_parameterized_mdp.mpc_hierarchical_parameter_state),
     ):
       cfg.observations[group].terms[name] = ObservationTermCfg(
         func=func, params={"command_name": "loco_mpc"}
       )
   cfg.rewards["hierarchical_mpc_parameter"] = RewardTermCfg(
-    func=g1_mpc_mimic_mdp.hierarchical_mpc_parameter_l2,
+    func=g1_mpc_parameterized_mdp.hierarchical_mpc_parameter_l2,
     weight=-1.0e-3,
     params={"action_name": "hybrid_mimic"},
   )

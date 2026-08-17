@@ -17,6 +17,7 @@ from .env_cfgs import (
   jingchu01_mpc_loco_manipulation_env_cfg,
   jingchu01_mpc_locomotion_env_cfg,
   jingchu01_mpc_rl_mimic_contact_env_cfg,
+  jingchu01_mpc_rl_mimic_reference_env_cfg,
   jingchu01_mpc_rl_mimic_student_env_cfg,
 )
 from .rl_cfg import (
@@ -63,6 +64,13 @@ register_mjlab_task(
   task_id="Mjlab-MPC-RL-Mimic-Contact-Jingchu01-28DOF",
   env_cfg=jingchu01_mpc_rl_mimic_contact_env_cfg(),
   play_env_cfg=jingchu01_mpc_rl_mimic_contact_env_cfg(play=True),
+  rl_cfg=jingchu01_multi_critic_mpc_rl_mimic_ppo_runner_cfg(),
+  runner_cls=MultiCriticVelocityOnPolicyRunner,
+)
+register_mjlab_task(
+  task_id="Mjlab-MPC-RL-Mimic-Reference-Jingchu01-28DOF",
+  env_cfg=jingchu01_mpc_rl_mimic_reference_env_cfg(),
+  play_env_cfg=jingchu01_mpc_rl_mimic_reference_env_cfg(play=True),
   rl_cfg=jingchu01_multi_critic_mpc_rl_mimic_ppo_runner_cfg(),
   runner_cls=MultiCriticVelocityOnPolicyRunner,
 )

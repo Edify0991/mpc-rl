@@ -236,8 +236,10 @@ def robot_profile(robot: str) -> tuple[mujoco.MjModel, tuple[str, ...]]:
 def robot_entity_cfg(robot: str):
   """Return the MJLab entity configuration used to capture a reference clip."""
   if robot == "themis":
-    from themis_training.themis.themis_constants import get_themis_effort_robot_cfg
-    return get_themis_effort_robot_cfg()
+    # Kinematic capture writes q/qdot directly and never applies an action,
+    # so the paper-baseline position-actuated entity is sufficient here.
+    from themis_training.themis.themis_constants import get_themis_robot_cfg
+    return get_themis_robot_cfg()
   if robot == "g1":
     from g1_training.g1.g1_constants import get_g1_effort_robot_cfg
     return get_g1_effort_robot_cfg()
