@@ -23,7 +23,10 @@ from training_common.reference_centroidal import (
   CentroidalState,
   ReferenceCentroidalTrajectory,
   compute_centroidal_state,
+  compute_reference_centroidal,
+  prealign_reference_kinematics_to_initial_anchor,
 )
+from .mimic_mdp import MotionReferenceCommand
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -35,6 +38,17 @@ class MimicLocoMPCCommandCfg(baseline.LocoMPCCommandCfg):
   """Configuration for fixed-plan, reference-centroidal mimic MPC."""
 
   motion_command_name: str | None = None
+  # These fields are MPC data, not local joint-tracker data.  They define the
+  # model-matched bodies used to reconstruct c, l, k and the nominal contacts.
+  centroidal_body_names: tuple[str, ...] = ()
+  prealign_centroidal_to_initial_anchor: bool = False
+  contact_body_names: tuple[str, ...] = ()
+  contact_point_offsets_b: dict[str, tuple[float, float, float]] | None = None
+  reference_contact_key: str | None = None
+  reference_contact_height_threshold: float = 0.03
+  reference_contact_speed_threshold: float = 0.35
+  reference_contact_min_stance_frames: int = 3
+  reference_contact_min_swing_frames: int = 2
 
   def build(self, env: "ManagerBasedRlEnv") -> "MimicLocoMPCCommand":
     return MimicLocoMPCCommand(self, env)
@@ -112,6 +126,9 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
     self._contact_mpc_target = torch.zeros(B, 2, device=env.device)
     self._contact_plan_mpc = torch.zeros(B, N, 2, device=env.device)
     self._contact_plan_valid = torch.ones(B, N, dtype=torch.bool, device=env.device)
+    self._reference_motion: MotionReferenceCommand | None = None
+    self._reference_centroidal: ReferenceCentroidalTrajectory | None = None
+    self._reference_contact_state: Tensor | None = None
 
   def current_centroidal_state(self) -> CentroidalState:
     """Read the exact whole-body centroidal state in simulator-world axes."""
@@ -127,6 +144,129 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
       body_inertia_diag=self._online_body_inertia_diag.to(dtype=dtype),
       body_inertial_quat_b=self._online_body_inertial_quat_b.to(dtype=dtype),
     )
+
+  def _ensure_reference_data(self, motion: MotionReferenceCommand) -> None:
+    """Build immutable c/l/k/contact clip data once, under the MPC owner."""
+    if self._reference_motion is motion and self._reference_centroidal is not None:
+      return
+    names = self.cfg.centroidal_body_names or tuple(motion._motion_body_names)
+    local_ids, pos, quat, lin_vel, ang_vel, resolved_names = motion.reference_body_kinematics(names, "centroidal")
+    if not resolved_names:
+      raise ValueError("Mimic MPC needs at least one centroidal body")
+    global_ids = motion.robot.indexing.body_ids[local_ids].detach().cpu().numpy()
+    model = self._env.sim.mj_model
+    dtype = pos.dtype
+
+    def model_field(name: str) -> Tensor:
+      return torch.as_tensor(np.asarray(getattr(model, name))[global_ids], device=self.device, dtype=dtype)
+
+    name_to_index = {name: i for i, name in enumerate(resolved_names)}
+    missing_contacts = [name for name in self.cfg.contact_body_names if name not in name_to_index]
+    if missing_contacts:
+      raise ValueError(
+        "Every MPC contact_body_name must be included in centroidal_body_names: "
+        f"{missing_contacts}"
+      )
+    contact_indices = torch.tensor(
+      [name_to_index[name] for name in self.cfg.contact_body_names], device=self.device, dtype=torch.long,
+    )
+    offsets_cfg = self.cfg.contact_point_offsets_b or {}
+    offsets = torch.tensor(
+      [offsets_cfg.get(name, (0.0, 0.0, 0.0)) for name in self.cfg.contact_body_names],
+      device=self.device, dtype=dtype,
+    ) if self.cfg.contact_body_names else torch.empty(0, 3, device=self.device, dtype=dtype)
+    if self.cfg.prealign_centroidal_to_initial_anchor and motion.cfg.reference_frame_alignment == "none":
+      try:
+        anchor_index = list(resolved_names).index(motion.cfg.anchor_body_name)
+      except ValueError as exc:
+        raise ValueError("centroidal prealignment requires the anchor in centroidal_body_names") from exc
+      pos, quat, lin_vel, ang_vel = prealign_reference_kinematics_to_initial_anchor(
+        body_pos_w=pos, body_quat_w=quat, body_lin_vel_w=lin_vel,
+        body_ang_vel_w=ang_vel, anchor_body_index=anchor_index,
+      )
+    reference = compute_reference_centroidal(
+      body_pos_w=pos, body_quat_w=quat, body_lin_vel_w=lin_vel, body_ang_vel_w=ang_vel,
+      body_mass=model_field("body_mass"), body_com_offset_b=model_field("body_ipos"),
+      body_inertia_diag=model_field("body_inertia"), body_inertial_quat_b=model_field("body_iquat"),
+      contact_body_indices=contact_indices, contact_point_offset_b=offsets,
+      body_linear_velocity_point=motion.motion.clip.body_linear_velocity_point,
+    )
+    self._reference_motion = motion
+    self._reference_centroidal = reference
+    self._reference_contact_state = self._load_or_infer_reference_contact_state(motion, reference)
+
+  def _load_or_infer_reference_contact_state(
+    self, motion: MotionReferenceCommand, reference: ReferenceCentroidalTrajectory,
+  ) -> Tensor:
+    contacts = reference.contact_pos_w
+    n_contacts = contacts.shape[1]
+    if self.cfg.reference_contact_key is not None:
+      labels = motion.motion.optional_tensor(self.cfg.reference_contact_key)
+      if labels is None:
+        raise ValueError(f"reference_contact_key={self.cfg.reference_contact_key!r} is absent from {motion.motion.path}")
+      if labels.shape != (motion.num_frames, n_contacts):
+        raise ValueError(f"Reference contact labels must be [{motion.num_frames}, {n_contacts}], got {tuple(labels.shape)}")
+      return labels.clamp(0.0, 1.0)
+    if n_contacts == 0:
+      return torch.empty(motion.num_frames, 0, device=self.device)
+    height = contacts[..., 2]
+    floor_height = height.amin(dim=0, keepdim=True)
+    prev, next_ = torch.cat([contacts[:1], contacts[:-1]], 0), torch.cat([contacts[1:], contacts[-1:]], 0)
+    speed = (next_ - prev).norm(dim=-1) * (0.5 * motion.fps)
+    candidates = (height - floor_height <= self.cfg.reference_contact_height_threshold) & (speed <= self.cfg.reference_contact_speed_threshold)
+    return self._smooth_reference_contact_state(candidates).to(torch.float32)
+
+  def _smooth_reference_contact_state(self, candidates: Tensor) -> Tensor:
+    min_stance, min_swing = self.cfg.reference_contact_min_stance_frames, self.cfg.reference_contact_min_swing_frames
+    if min_stance < 1 or min_swing < 1:
+      raise ValueError("reference contact minimum stance/swing duration must be at least one frame")
+    state = candidates.clone()
+    for contact_id in range(state.shape[1]):
+      for target, maximum, replacement in ((False, min_swing - 1, True), (True, min_stance - 1, False)):
+        start = 0
+        while start < state.shape[0]:
+          end = start + 1
+          while end < state.shape[0] and bool(state[end, contact_id].item()) == bool(state[start, contact_id].item()):
+            end += 1
+          if bool(state[start, contact_id].item()) == target and end - start <= maximum:
+            if start > 0 and end < state.shape[0] and bool(state[start - 1, contact_id].item()) == replacement and bool(state[end, contact_id].item()) == replacement:
+              state[start:end, contact_id] = replacement
+          start = end
+    return state
+
+  def _reference_horizon(
+    self, motion: MotionReferenceCommand, steps: int, dt: float,
+  ) -> tuple[ReferenceCentroidalTrajectory, Tensor, Tensor]:
+    self._ensure_reference_data(motion)
+    assert self._reference_centroidal is not None and self._reference_contact_state is not None
+    s = motion.horizon_frame_progress(steps, dt)
+    reference = self._reference_centroidal
+    com_pos = motion.sample_reference_tensor(reference.com_pos_w, s)
+    contact_pos = motion.sample_reference_tensor(reference.contact_pos_w, s)
+    valid = motion.horizon_valid(steps, dt)
+    zeros = torch.zeros_like(com_pos)
+    com_vel = torch.where(valid.unsqueeze(-1), motion.sample_reference_tensor(reference.com_vel_w, s), zeros)
+    linear = torch.where(valid.unsqueeze(-1), motion.sample_reference_tensor(reference.linear_momentum_w, s), zeros)
+    angular = torch.where(valid.unsqueeze(-1), motion.sample_reference_tensor(reference.angular_momentum_w, s), zeros)
+    origins = self._env.scene.env_origins[:, None, :]
+    com_pos, contact_pos = com_pos + origins, contact_pos + origins.unsqueeze(-2)
+    contact_state = motion.sample_reference_tensor(self._reference_contact_state, s)
+    return ReferenceCentroidalTrajectory(
+      com_pos_w=com_pos, com_vel_w=com_vel, linear_momentum_w=linear, angular_momentum_w=angular,
+      contact_pos_w=contact_pos, contact_pos_rel_com_w=contact_pos - com_pos.unsqueeze(-2),
+    ), contact_state, valid
+
+  def reference_centroidal_observation(self) -> Tensor:
+    if self.cfg.motion_command_name is None:
+      return torch.zeros(self.num_envs, 18, device=self.device)
+    motion = self._env.command_manager.get_term(self.cfg.motion_command_name)
+    if not isinstance(motion, MotionReferenceCommand):
+      raise TypeError("Mimic MPC motion command must be MotionReferenceCommand")
+    reference, _, _ = self._reference_horizon(motion, 1, 0.0)
+    return torch.cat((
+      reference.com_pos_w[:, 0], reference.com_vel_w[:, 0], reference.linear_momentum_w[:, 0],
+      reference.angular_momentum_w[:, 0], reference.contact_pos_rel_com_w[:, 0].flatten(1),
+    ), dim=-1)
 
   def _interpolate_traj_refs(self) -> None:
     super()._interpolate_traj_refs()
@@ -195,59 +335,23 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
     site_pos = robot.data.site_pos_w[:, self._site_ids, :]
     r_lf = site_pos[:, self._lf_site_local_idx, :]
     r_rf = site_pos[:, self._rf_site_local_idx, :]
-    vel_cmd = self._env.command_manager.get_command(cfg.vel_cmd_name)
-    if vel_cmd is None:
-      vx_body = torch.zeros(B, device=device)
-      vy_body = torch.zeros(B, device=device)
-      wz = torch.zeros(B, device=device)
-    else:
-      vx_body, vy_body, wz = vel_cmd[:, 0], vel_cmd[:, 1], vel_cmd[:, 2]
-
-    quat_w = robot.data.root_link_quat_w
-    q_w, q_x, q_y, q_z = quat_w[:, 0], quat_w[:, 1], quat_w[:, 2], quat_w[:, 3]
-    yaw = torch.atan2(2.0 * (q_w * q_z + q_x * q_y), 1.0 - 2.0 * (q_y * q_y + q_z * q_z))
-    cos_y, sin_y = yaw.cos(), yaw.sin()
-    vx, vy = cos_y * vx_body - sin_y * vy_body, sin_y * vx_body + cos_y * vy_body
     site_quat = robot.data.site_quat_w[:, self._site_ids, :]
     R_lf = baseline._quat_to_rot(site_quat[:, self._lf_site_local_idx, :])
     R_rf = baseline._quat_to_rot(site_quat[:, self._rf_site_local_idx, :])
 
-    k_steps = torch.arange(N + 1, device=device, dtype=torch.float32)
-    yaw_k = yaw.unsqueeze(1) + wz.unsqueeze(1) * k_steps * dt
-    vx_w_k = yaw_k.cos() * vx_body.unsqueeze(1) - yaw_k.sin() * vy_body.unsqueeze(1)
-    vy_w_k = yaw_k.sin() * vx_body.unsqueeze(1) + yaw_k.cos() * vy_body.unsqueeze(1)
-    x_ref = x0.unsqueeze(1).expand(B, N + 1, -1).clone()
-    x_ref[:, 0, :2] = c[:, :2]
-    x_ref[:, 1:, 0] = c[:, 0:1] + torch.cumsum(vx_w_k[:, :-1] * dt, dim=1)
-    x_ref[:, 1:, 1] = c[:, 1:2] + torch.cumsum(vy_w_k[:, :-1] * dt, dim=1)
-    x_ref[:, :, 2] = robot.data.default_root_state[:, 2:3]
-    x_ref[:, :, 3] = vx_w_k * cfg.mass
-    x_ref[:, :, 4] = vy_w_k * cfg.mass
-    x_ref[:, :, 5] = 0.0
-    x_ref[:, :, 6:8] = 0.0
-    x_ref[:, :, 8] = (float(self._I_approx[2, 2]) * wz).unsqueeze(1)
-
-    reference_contacts: Tensor | None = None
-    reference_contact_state: Tensor | None = None
-    reference_contact_valid: Tensor | None = None
-    if cfg.motion_command_name is not None:
-      motion = self._env.command_manager.get_term(cfg.motion_command_name)
-      if motion is None or not hasattr(motion, "centroidal_horizon"):
-        raise ValueError(f"motion_command_name={cfg.motion_command_name!r} must provide centroidal_horizon(steps, dt)")
-      if hasattr(motion, "reference_centroidal_horizon"):
-        reference = motion.reference_centroidal_horizon(N + 1, dt)
-        x_ref, ref_vel, reference_contacts = apply_mimic_centroidal_reference_to_mpc_target(x_ref, reference)
-        reference_contact_state = motion.reference_contact_horizon(N, dt)
-        reference_contact_valid = motion.reference_horizon_valid(N, dt)
-      else:
-        ref_pos, ref_vel, ref_ang = motion.centroidal_horizon(N + 1, dt)
-        x_ref[:, :, :3] = ref_pos
-        x_ref[:, :, 3:6] = ref_vel * cfg.mass
-        x_ref[:, :, 6:9] = ref_ang @ self._I_approx
-      vx, vy = ref_vel[:, 0, 0], ref_vel[:, 0, 1]
-
-    if reference_contacts is None or reference_contact_state is None:
-      raise ValueError("Mimic MPC requires a MotionReferenceCommand with a two-foot contact schedule")
+    if cfg.motion_command_name is None:
+      raise ValueError("MimicLocoMPCCommand requires motion_command_name")
+    motion = self._env.command_manager.get_term(cfg.motion_command_name)
+    if not isinstance(motion, MotionReferenceCommand):
+      raise ValueError(f"motion_command_name={cfg.motion_command_name!r} must name a MotionReferenceCommand")
+    # No velocity-command approximation is constructed in the Mimic path.
+    # The QP target at every node is the retargeted clip's model-consistent
+    # [c_ref, l_ref, k_ref], sampled at s_i=s(t)+i*f_ref*dt.
+    reference, contact_horizon, valid_horizon = self._reference_horizon(motion, N + 1, dt)
+    x_ref = torch.empty(B, N + 1, 9, device=device, dtype=x0.dtype)
+    x_ref, _, reference_contacts = apply_mimic_centroidal_reference_to_mpc_target(x_ref, reference)
+    reference_contact_state = contact_horizon[:, :-1]
+    reference_contact_valid = valid_horizon[:, :-1]
     if reference_contacts.shape[2] != 2 or reference_contact_state.shape[2] != 2:
       raise ValueError("The bipedal centroidal MPC requires exactly [left, right] reference contacts")
     x_ref = self._parameterize_reference(x0, x_ref)
@@ -309,6 +413,14 @@ def mpc_ang_mom_ref(env: "ManagerBasedRlEnv", command_name: str = "loco_mpc") ->
   if not isinstance(term, MimicLocoMPCCommand):
     return torch.zeros(env.num_envs, 3, device=env.device)
   return term._k_mpc_target - term.current_centroidal_state().angular_momentum_w
+
+
+def mpc_reference_centroidal(env: "ManagerBasedRlEnv", command_name: str = "loco_mpc") -> Tensor:
+  """MPC-owned reference ``[c, dc, l, k, r_contact-c]`` for the critic."""
+  term = env.command_manager.get_term(command_name)
+  if not isinstance(term, MimicLocoMPCCommand):
+    return torch.zeros(env.num_envs, 18, device=env.device)
+  return term.reference_centroidal_observation()
 
 
 class MpcExactCentroidalLandmarkTracking:

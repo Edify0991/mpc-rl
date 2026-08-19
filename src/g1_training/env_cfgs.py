@@ -327,8 +327,6 @@ def g1_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 def _add_motion_reference(
   cfg: ManagerBasedRlEnvCfg,
   motion_file: str | None,
-  *,
-  centroidal_body_names: tuple[str, ...] | None = None,
 ) -> None:
   # The mjlab registry constructs task configs without function arguments.
   # Keep ``motion_file`` programmatic for experiments, but also allow normal
@@ -345,9 +343,7 @@ def _add_motion_reference(
     joint_names=G1_JOINT_NAMES,
     body_names=G1_TRACKING_BODY_NAMES,
     anchor_body_name="pelvis",
-    centroidal_body_names=centroidal_body_names or G1_CENTROIDAL_BODY_NAMES,
     reference_frame_alignment="initial_anchor",
-    contact_body_names=G1_FOOT_BODIES,
     random_start=False,
     debug_vis=False,
   )
@@ -355,26 +351,11 @@ def _add_motion_reference(
     cfg.observations[group].terms["motion_reference"] = ObservationTermCfg(
       func=mimic_mdp.motion_reference, params={"command_name": "motion"}
     )
-    cfg.observations[group].terms["motion_anchor_error"] = ObservationTermCfg(
-      func=mimic_mdp.motion_anchor_error, params={"command_name": "motion"}
-    )
-  cfg.observations["critic"].terms["motion_body_targets"] = ObservationTermCfg(
-    func=mimic_mdp.motion_body_targets, params={"command_name": "motion"}
-  )
   cfg.rewards["motion_joint_pos"] = RewardTermCfg(
     func=mimic_mdp.motion_joint_error_exp, weight=2.0, params={"command_name": "motion", "std": 0.4}
   )
   cfg.rewards["motion_joint_vel"] = RewardTermCfg(
     func=mimic_mdp.motion_joint_vel_error_exp, weight=1.0, params={"command_name": "motion", "std": 2.0}
-  )
-  cfg.rewards["motion_anchor"] = RewardTermCfg(
-    func=mimic_mdp.motion_anchor_position_error_exp, weight=1.0, params={"command_name": "motion", "std": 0.3}
-  )
-  cfg.rewards["motion_body"] = RewardTermCfg(
-    func=mimic_mdp.motion_relative_body_position_error_exp, weight=2.0, params={"command_name": "motion", "std": 0.3}
-  )
-  cfg.rewards["tracking_success"] = RewardTermCfg(
-    func=mimic_mdp.tracking_success, weight=0.25, params={"command_name": "motion"}
   )
 
 
@@ -394,7 +375,7 @@ def g1_mpc_rl_mimic_contact_env_cfg(
   """G1 Phase-1 MPC-RL mimic teacher with future contact-plan action."""
   cfg = g1_mpc_locomotion_env_cfg(play=play)
   cfg.scene.entities = {"robot": get_g1_effort_robot_cfg()}
-  _add_motion_reference(cfg, motion_file, centroidal_body_names=centroidal_body_names)
+  _add_motion_reference(cfg, motion_file)
   motion = cfg.commands["motion"]
   assert isinstance(motion, MotionReferenceCommandCfg)
   motion.loop = False
@@ -408,6 +389,8 @@ def g1_mpc_rl_mimic_contact_env_cfg(
   loco_mpc.mass = G1_TOTAL_MASS
   loco_mpc.inertia_body = G1_CENTROIDAL_INERTIA_BODY
   loco_mpc.motion_command_name = "motion"
+  loco_mpc.centroidal_body_names = centroidal_body_names or G1_CENTROIDAL_BODY_NAMES
+  loco_mpc.contact_body_names = G1_FOOT_BODIES
   loco_mpc.use_policy_contact_plan = True
   loco_mpc.policy_contact_plan_residual_scale = 0.75
   loco_mpc.run_every_n_steps = 1
@@ -429,13 +412,12 @@ def g1_mpc_rl_mimic_contact_env_cfg(
   }
   for group in ("actor", "critic"):
     cfg.observations[group].terms.pop("motion_reference", None)
-    cfg.observations[group].terms.pop("motion_anchor_error", None)
   cfg.observations["actor"].terms["motion_reference_preview"] = ObservationTermCfg(
     func=mimic_mdp.motion_reference_preview,
     params={"command_name": "motion", "frame_offset": 1},
   )
-  cfg.observations["critic"].terms["motion_reference_centroidal"] = ObservationTermCfg(
-    func=mimic_mdp.motion_reference_centroidal, params={"command_name": "motion"}
+  cfg.observations["critic"].terms["mpc_reference_centroidal"] = ObservationTermCfg(
+    func=g1_mpc_mimic_mdp.mpc_reference_centroidal, params={"command_name": "loco_mpc"}
   )
   for name, func in (
     ("mpc_com_ref", g1_mpc_mimic_mdp.mpc_com_ref),

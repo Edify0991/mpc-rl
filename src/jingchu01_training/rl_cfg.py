@@ -28,6 +28,7 @@ def jingchu01_hierarchical_mimic_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
 
 
 def jingchu01_mpc_rl_mimic_contact_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
+  """Single-critic PPO baseline for the full scalar Mimic+MPC reward."""
   cfg = jingchu01_ppo_runner_cfg()
   cfg.experiment_name = "jingchu01_mpc_rl_mimic_contact"
   cfg.num_steps_per_env = 40
@@ -35,8 +36,15 @@ def jingchu01_mpc_rl_mimic_contact_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
   return cfg
 
 
+def jingchu01_mpc_rl_mimic_reference_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
+  """Single-critic PPO baseline for the fixed-reference Mimic MPC task."""
+  cfg = jingchu01_mpc_rl_mimic_contact_ppo_runner_cfg()
+  cfg.experiment_name = "jingchu01_mpc_rl_mimic_reference"
+  return cfg
+
+
 def jingchu01_multi_critic_mpc_rl_mimic_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
-  """Four-value-head PPO for the MPC-contact teacher and hierarchical task."""
+  """Four-value-head PPO variant of the MPC-contact Mimic teacher."""
   cfg = jingchu01_mpc_rl_mimic_contact_ppo_runner_cfg()
   cfg.algorithm = MultiCriticPpoAlgorithmCfg(
     entropy_coef=cfg.algorithm.entropy_coef,
@@ -45,6 +53,19 @@ def jingchu01_multi_critic_mpc_rl_mimic_ppo_runner_cfg() -> RslRlOnPolicyRunnerC
     lam=cfg.algorithm.lam,
   )
   cfg.experiment_name = "jingchu01_mpc_rl_mimic_multi_critic"
+  return cfg
+
+
+def jingchu01_multi_critic_mpc_rl_mimic_reference_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
+  """Four-value-head PPO variant of the fixed-reference Mimic MPC task."""
+  cfg = jingchu01_mpc_rl_mimic_reference_ppo_runner_cfg()
+  cfg.algorithm = MultiCriticPpoAlgorithmCfg(
+    entropy_coef=cfg.algorithm.entropy_coef,
+    learning_rate=cfg.algorithm.learning_rate,
+    gamma=cfg.algorithm.gamma,
+    lam=cfg.algorithm.lam,
+  )
+  cfg.experiment_name = "jingchu01_mpc_rl_mimic_reference_multi_critic"
   return cfg
 
 
