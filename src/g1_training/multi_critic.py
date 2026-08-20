@@ -40,6 +40,11 @@ class MultiCriticPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
   """Algorithm settings for the four-channel G1 imitation return."""
 
   class_name: str = "g1_training.multi_critic:MultiCriticPPO"
+  # rsl_rl >= 4 indexes these fields unconditionally in its logger.  Keep
+  # them explicit and disabled; this decomposed-return PPO does not support
+  # RND or symmetry augmentation.
+  rnd_cfg: dict | None = None
+  symmetry_cfg: dict | None = None
   critic_names: tuple[str, ...] = CRITIC_NAMES
   critic_value_loss_coefficients: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0)
   actor_advantage_weights: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0)

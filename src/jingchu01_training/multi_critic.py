@@ -48,6 +48,13 @@ class MultiCriticPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
   """Algorithm settings for the four-channel Jingchu01 imitation return."""
 
   class_name: str = "jingchu01_training.multi_critic:MultiCriticPPO"
+  # rsl_rl >= 4 expects these keys to be present even when the corresponding
+  # extension is disabled.  The mjlab config base used by this repository
+  # predates those fields, so add explicit null values to keep the serialized
+  # runner configuration compatible.  MultiCriticPPO rejects non-null values:
+  # decomposed returns are intentionally not combined with RND/symmetry yet.
+  rnd_cfg: dict | None = None
+  symmetry_cfg: dict | None = None
   critic_names: tuple[str, ...] = CRITIC_NAMES
   critic_value_loss_coefficients: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0)
   actor_advantage_weights: tuple[float, ...] = JINGCHU01_MIMIC_ACTOR_ADVANTAGE_WEIGHTS
