@@ -78,8 +78,13 @@ class HybridMimicAction(ActionTerm):
     self._joint_ids = torch.tensor(joint_ids, device=self.device, dtype=torch.long)
     self._num_joints = len(joint_ids)
     joint_names = [self._entity.joint_names[int(i)] for i in self._joint_ids]
-    self._kp = self._expand_gain(cfg.kp, joint_names)
-    self._kd = self._expand_gain(cfg.kd, joint_names)
+    self._kp_nominal = self._expand_gain(cfg.kp, joint_names)
+    self._kd_nominal = self._expand_gain(cfg.kd, joint_names)
+    # Unlike a BuiltinPositionActuator, this action computes its PD torque
+    # explicitly. Keep per-environment gain buffers so actuator-gain DR can
+    # be applied without mutating an incompatible BuiltinMotorActuator.
+    self._kp = self._kp_nominal.expand(self.num_envs, -1).clone()
+    self._kd = self._kd_nominal.expand(self.num_envs, -1).clone()
     site_ids, resolved_sites = self._entity.find_sites(cfg.contact_site_names, preserve_order=True)
     if len(site_ids) != len(cfg.contact_site_names):
       raise ValueError(f"Could not resolve contact sites {cfg.contact_site_names}; got {resolved_sites}")
@@ -234,6 +239,24 @@ class HybridMimicAction(ActionTerm):
       raise ValueError(f"PD gain map is missing controlled joints: {missing}")
     return torch.tensor([[gain[name] for name in joint_names]], device=self.device, dtype=torch.float32)
 
+  def randomize_pd_gains(
+    self, env_ids: torch.Tensor | slice | None, *, kp_range: tuple[float, float], kd_range: tuple[float, float],
+  ) -> None:
+    """Scale explicit controller gains independently for each environment.
+
+    This is the effort-actuator counterpart of mjlab's ``dr.pd_gains``.
+    It deliberately acts on the controller that produces the commanded torque
+    rather than on ``BuiltinMotorActuator``, which has no PD gains to mutate.
+    """
+    if kp_range[0] <= 0.0 or kd_range[0] <= 0.0 or kp_range[0] > kp_range[1] or kd_range[0] > kd_range[1]:
+      raise ValueError("PD gain ranges must be positive ordered intervals")
+    ids = torch.arange(self.num_envs, device=self.device) if env_ids is None else env_ids
+    count = self.num_envs if isinstance(ids, slice) else len(ids)
+    kp_scale = torch.empty(count, self._num_joints, device=self.device).uniform_(*kp_range)
+    kd_scale = torch.empty(count, self._num_joints, device=self.device).uniform_(*kd_range)
+    self._kp[ids] = self._kp_nominal * kp_scale
+    self._kd[ids] = self._kd_nominal * kd_scale
+
   def apply_actions(self) -> None:
     command = self._env.command_manager.get_term(self.cfg.motion_command_name)
     if not isinstance(command, MotionReferenceCommand):
@@ -282,6 +305,18 @@ class HybridMimicAction(ActionTerm):
 
 def cfg_scale(scale: float, action: torch.Tensor) -> torch.Tensor:
   return action * scale
+
+
+def randomize_hybrid_pd_gains(
+  env: "ManagerBasedRlEnv", env_ids: torch.Tensor | None,
+  action_name: str = "hybrid_mimic", kp_range: tuple[float, float] = (1.0, 1.0),
+  kd_range: tuple[float, float] = (1.0, 1.0),
+) -> None:
+  """MJLab startup event for the explicit HybridMimic PD controller."""
+  action = env.action_manager.get_term(action_name)
+  if not isinstance(action, HybridMimicAction):
+    raise TypeError(f"{action_name!r} must be HybridMimicAction, got {type(action).__name__}")
+  action.randomize_pd_gains(env_ids, kp_range=kp_range, kd_range=kd_range)
 
 
 def hybrid_torque_l2(env: "ManagerBasedRlEnv", action_name: str = "hybrid_mimic") -> torch.Tensor:

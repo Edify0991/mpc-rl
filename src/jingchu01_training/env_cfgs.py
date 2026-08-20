@@ -430,6 +430,13 @@ def jingchu01_mpc_rl_mimic_contact_env_cfg(
       kd=DAMPING,
     )
   }
+  # This task uses BuiltinMotorActuator plus the explicit PD law in
+  # HybridMimicAction.  mjlab.dr.pd_gains only accepts position actuators;
+  # randomize the actual torque-controller gains instead.
+  cfg.events["pd_gains"] = EventTermCfg(
+    mode="startup", func=hybrid_mimic.randomize_hybrid_pd_gains,
+    params={"action_name": "hybrid_mimic", "kp_range": (0.8, 1.2), "kd_range": (0.8, 1.2)},
+  )
   # _add_motion_reference has installed the current [q_ref, dq_ref] command
   # in both groups.  Do not replace it with a one-frame-ahead preview: the
   # action term tracks the current frame, and an actor that only sees t+1 is
