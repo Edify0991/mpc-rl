@@ -56,6 +56,10 @@ class MimicLocoMPCCommandCfg(baseline.LocoMPCCommandCfg):
   reference_contact_speed_threshold: float = 0.35
   reference_contact_min_stance_frames: int = 3
   reference_contact_min_swing_frames: int = 2
+  # A touchdown/liftoff occupies a finite 50-Hz simulation interval.  Force
+  # landmarks are disabled for the event frame and this many following source
+  # frames instead of blending incompatible pre/post-contact wrenches.
+  reference_contact_transition_guard_frames: int = 2
 
   def build(self, env: "ManagerBasedRlEnv") -> "MimicLocoMPCCommand":
     return MimicLocoMPCCommand(self, env)
@@ -234,7 +238,9 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
         raise ValueError(f"reference_contact_key={self.cfg.reference_contact_key!r} is absent from {motion.motion.path}")
       if labels.shape != (motion.num_frames, n_contacts):
         raise ValueError(f"Reference contact labels must be [{motion.num_frames}, {n_contacts}], got {tuple(labels.shape)}")
-      return labels.clamp(0.0, 1.0)
+      # A contact plan is a mode schedule, not a probability.  Binarize once
+      # at load time so every later MPC/RL sample is exactly 0 or 1.
+      return (labels >= 0.5).to(dtype=torch.float32)
     if n_contacts == 0:
       return torch.empty(motion.num_frames, 0, device=self.device)
     height = contacts[..., 2]
@@ -278,7 +284,10 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
     angular = torch.where(valid.unsqueeze(-1), motion.sample_reference_tensor(reference.angular_momentum_w, s), zeros)
     origins = self._env.scene.env_origins[:, None, :]
     com_pos, contact_pos = com_pos + origins, contact_pos + origins.unsqueeze(-2)
-    contact_state = motion.sample_reference_tensor(self._reference_contact_state, s)
+    # c'_j is a discrete zero-order-held sample of the 50-Hz contact sequence
+    # c_k.  It must never be obtained by linear interpolation: a fractional
+    # sigma would create a fictitious partial support during touchdown/liftoff.
+    contact_state = motion.sample_reference_tensor_zoh(self._reference_contact_state, s)
     return ReferenceCentroidalTrajectory(
       com_pos_w=com_pos, com_vel_w=com_vel, linear_momentum_w=linear, angular_momentum_w=angular,
       contact_pos_w=contact_pos, contact_pos_rel_com_w=contact_pos - com_pos.unsqueeze(-2),
@@ -301,10 +310,11 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
     N = self.cfg.mpc_horizon
     t_frac = self.cfg.tracking_lookahead_frac * (N - 1) + self._traj_step * self._env.step_dt / self.cfg.mpc_dt
     idx = min(max(int(t_frac), 0), N - 2)
-    alpha = min(max(t_frac - idx, 0.0), 1.0)
-    self._u_mpc_target = (
-      (1.0 - alpha) * self._u_traj[:, idx] + alpha * self._u_traj[:, idx + 1]
-    )
+    # Centroidal states are continuous and are interpolated in the parent
+    # method.  A contact wrench is a mode-conditioned MPC control and follows
+    # the zero-order hold assumed by the discrete dynamics: use the active
+    # prediction cell exactly, including an intentional jump at a mode change.
+    self._u_mpc_target = self._u_traj[:, idx]
     self._force_mpc_target = torch.stack(
       [self._u_mpc_target[:, 0:3], self._u_mpc_target[:, 6:9]], dim=1
     )
@@ -312,6 +322,31 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
       [self._u_mpc_target[:, 3:6], self._u_mpc_target[:, 9:12]], dim=1
     )
     self._contact_mpc_target = self._sigma_traj[:, idx]
+
+  def reference_contact_transition_mask(self) -> Tensor:
+    """Return [B, 2] guard masks derived from the original 50-Hz c_k labels.
+
+    The mask is true at a contact transition and for the configured following
+    source frames.  It deliberately does *not* inspect the downsampled MPC
+    schedule c'_j: reward gating is tied to physical touchdown/liftoff timing
+    in the motion source rather than to an MPC-grid representation of it.
+    """
+    if self.cfg.reference_contact_transition_guard_frames < 1:
+      raise ValueError("reference_contact_transition_guard_frames must be at least one")
+    if self.cfg.motion_command_name is None:
+      return torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)
+    motion = self._env.command_manager.get_term(self.cfg.motion_command_name)
+    if not isinstance(motion, MotionReferenceCommand):
+      raise TypeError("Mimic MPC motion command must be MotionReferenceCommand")
+    self._ensure_reference_data(motion)
+    assert self._reference_contact_state is not None
+    progress = motion.horizon_frame_progress(1, 0.0)[:, 0]
+    mask = torch.zeros(self.num_envs, self._reference_contact_state.shape[1], dtype=torch.bool, device=self.device)
+    for offset in range(self.cfg.reference_contact_transition_guard_frames):
+      current = motion.sample_reference_tensor_zoh(self._reference_contact_state, progress - offset)
+      previous = motion.sample_reference_tensor_zoh(self._reference_contact_state, progress - offset - 1.0)
+      mask |= current.ne(previous)
+    return mask
 
   def _resample_command(self, env_ids: Tensor) -> None:
     super()._resample_command(env_ids)
@@ -471,6 +506,33 @@ class MpcExactCentroidalLandmarkTracking:
       + w_angular_momentum * (state.angular_momentum_w - term._k_mpc_target).square().sum(dim=-1)
     )
     return torch.exp(-loss)
+
+
+def mpc_grf_tracking_mode_aware(
+  env: "ManagerBasedRlEnv", command_name: str = "loco_mpc", grf_sensor_name: str = "feet_ground_contact",
+) -> Tensor:
+  """Mode-aware, dimensionless GRF landmark cost for Mimic MPC.
+
+  The target is the first wrench of the latest receding-horizon solve, held
+  until that solve is refreshed.  A source-contact transition masks only the
+  affected foot, avoiding a force target during impact/separation.  Errors
+  are normalized by each environment's randomized weight ``m*g`` so the
+  reward scale does not change with the body-inertia/mass DR.
+  """
+  term = env.command_manager.get_term(command_name)
+  if not isinstance(term, MimicLocoMPCCommand):
+    return torch.zeros(env.num_envs, device=env.device)
+  sensor = env.scene[grf_sensor_name]
+  force = getattr(sensor.data, "force", None)
+  if force is None:
+    return torch.zeros(env.num_envs, device=env.device)
+  actual = force.reshape(env.num_envs, 2, 3)
+  target = term.command.reshape(env.num_envs, 2, 3)
+  mass = term._mpc_model_parameters.mass.to(device=actual.device, dtype=actual.dtype).clamp_min(1.0e-6)
+  normalized_error = (actual - target).square().mean(dim=-1).sqrt() / (mass[:, None] * 9.81)
+  stable = ~term.reference_contact_transition_mask()
+  stable_f = stable.to(dtype=actual.dtype)
+  return -(normalized_error * stable_f).sum(dim=-1) / stable_f.sum(dim=-1).clamp_min(1.0)
 
 
 def mpc_contact_force_ref(env: "ManagerBasedRlEnv", command_name: str = "loco_mpc") -> Tensor:

@@ -23,6 +23,7 @@ from tensordict import TensorDict
 
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 from mjlab.rl import RslRlPpoAlgorithmCfg
+from mjlab.rl.runner import MjlabOnPolicyRunner
 
 if TYPE_CHECKING:
   from rsl_rl.env import VecEnv
@@ -404,9 +405,19 @@ class MultiCriticPPO:
 
 
 class MultiCriticVelocityOnPolicyRunner(VelocityOnPolicyRunner):
-  """Velocity runner that supplies exact reward-manager channels to PPO."""
+  """Velocity runner that supplies exact reward-manager channels to PPO.
+
+  The generic velocity ONNX exporter assumes a ``joint_pos``
+  ``JointPositionAction``.  HybridMimic instead outputs residual joint targets
+  that an explicit PD controller turns into effort commands, so a dedicated
+  deployment exporter is required.
+  """
 
   alg: MultiCriticPPO
+
+  def save(self, path: str, infos: dict | None = None) -> None:
+    """Save checkpoints without applying incompatible velocity ONNX metadata."""
+    MjlabOnPolicyRunner.save(self, path, infos)
 
   def _group_rewards(self, rewards: torch.Tensor) -> torch.Tensor:
     manager = self.env.unwrapped.reward_manager

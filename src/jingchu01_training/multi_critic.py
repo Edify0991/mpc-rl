@@ -26,6 +26,7 @@ from tensordict import TensorDict
 
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 from mjlab.rl import RslRlPpoAlgorithmCfg
+from mjlab.rl.runner import MjlabOnPolicyRunner
 
 if TYPE_CHECKING:
   from rsl_rl.env import VecEnv
@@ -414,9 +415,22 @@ class MultiCriticPPO:
 
 
 class MultiCriticVelocityOnPolicyRunner(VelocityOnPolicyRunner):
-  """Velocity runner that supplies exact reward-manager channels to PPO."""
+  """Velocity runner that supplies exact reward-manager channels to PPO.
+
+  The parent velocity runner's ``save`` method also invokes MJLab's generic
+  deployment exporter.  That exporter assumes an action term named
+  ``joint_pos`` implemented by ``JointPositionAction``.  Mimic instead has a
+  ``hybrid_mimic`` effort action whose output needs reference q/dq plus an
+  explicit PD controller, so exporting only the actor with position-action
+  metadata would be misleading.  Checkpoints remain fully deployable inputs
+  for a future, dedicated HybridMimic exporter.
+  """
 
   alg: MultiCriticPPO
+
+  def save(self, path: str, infos: dict | None = None) -> None:
+    """Save the complete multi-critic checkpoint without generic ONNX export."""
+    MjlabOnPolicyRunner.save(self, path, infos)
 
   def _group_rewards(self, rewards: torch.Tensor) -> torch.Tensor:
     manager = self.env.unwrapped.reward_manager

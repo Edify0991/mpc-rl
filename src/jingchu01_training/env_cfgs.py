@@ -468,7 +468,11 @@ def jingchu01_mpc_rl_mimic_contact_env_cfg(
       "w_angular_momentum": 0.10,
     },
   )
-  cfg.rewards["mpc_grf_tracking"].weight = 0.05
+  cfg.rewards["mpc_grf_tracking"] = RewardTermCfg(
+    func=jingchu01_mpc_mimic_mdp.mpc_grf_tracking_mode_aware,
+    weight=0.05,
+    params={"command_name": "loco_mpc", "grf_sensor_name": "feet_ground_contact"},
+  )
   cfg.rewards["hybrid_torque"] = RewardTermCfg(
     func=hybrid_mimic.hybrid_torque_l2, weight=-2.0e-5, params={"action_name": "hybrid_mimic"}
   )

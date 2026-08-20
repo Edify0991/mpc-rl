@@ -386,6 +386,20 @@ class MotionReferenceCommand(CommandTerm):
       return sampled / sampled.norm(dim=-1, keepdim=True).clamp_min(1.0e-8)
     return v0 + alpha.reshape(*alpha.shape, *([1] * (v0.ndim - alpha.ndim))) * (v1 - v0)
 
+  def sample_reference_tensor_zoh(self, values: torch.Tensor, frame_progress: torch.Tensor) -> torch.Tensor:
+    """Sample a reference tensor with left-continuous zero-order hold.
+
+    This is intentionally separate from :meth:`sample_reference_tensor`.
+    Kinematic and centroidal quantities are continuous landmarks and use
+    linear interpolation; hybrid quantities such as a binary contact mode
+    must retain their source frame exactly.  At an integer frame boundary the
+    value is the new (post-event) frame value.
+    """
+    if values.shape[0] != self.num_frames:
+      raise ValueError("Reference tensor must have the clip frame dimension first")
+    progress = self._normalize_frame_progress(frame_progress)
+    return values[progress.floor().long()]
+
   def _normalize_frame_progress(self, progress: torch.Tensor) -> torch.Tensor:
     if self.cfg.loop:
       return torch.remainder(progress, self.num_frames)
