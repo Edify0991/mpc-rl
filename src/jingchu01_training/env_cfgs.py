@@ -312,6 +312,30 @@ def _add_motion_reference(
   cfg: ManagerBasedRlEnvCfg,
   motion_file: str | None,
 ) -> None:
+  """Install the joint-space reference as the sole policy command.
+
+  The velocity-task factory contributes a sampled ``twist`` command together
+  with observations, rewards, and curricula that consume it.  A nonperiodic
+  motion-mimic task must not retain any of these: its command is the current
+  ``[q_ref, dq_ref]`` stream owned by :class:`MotionReferenceCommand`.  In
+  particular, ``motion_reference`` intentionally contains no global base
+  pose, so this does not reinstate global-root imitation.
+  """
+  # Remove every velocity-command consumer before removing the producer.  Do
+  # not merely set their weights to zero: managers may still evaluate a
+  # zero-weight term, and then retain a hidden dependency on ``twist``.
+  for group in ("actor", "critic"):
+    cfg.observations[group].terms.pop("command", None)
+    cfg.observations[group].terms.pop("phase", None)
+  for name, term in tuple(cfg.rewards.items()):
+    if isinstance(term.params, dict) and term.params.get("command_name") == "twist":
+      cfg.rewards.pop(name)
+  if cfg.curriculum is not None:
+    for name, term in tuple(cfg.curriculum.items()):
+      if isinstance(term.params, dict) and term.params.get("command_name") == "twist":
+        cfg.curriculum.pop(name)
+  cfg.commands.pop("twist", None)
+
   motion_file = motion_file or os.environ.get("THEMIS_JINGCHU01_MOTION_FILE")
   if motion_file is not None and not Path(motion_file).is_file():
     raise FileNotFoundError(
@@ -366,6 +390,11 @@ def jingchu01_mpc_rl_mimic_contact_env_cfg(
   )
   loco_mpc = cfg.commands["loco_mpc"]
   assert isinstance(loco_mpc, jingchu01_mpc_parameterized_mdp.ParameterizedMimicLocoMPCCommandCfg)
+  # The parameterized command inherits this legacy field from the velocity
+  # MPC only for configuration compatibility.  MimicLocoMPCCommand never
+  # reads it; setting it to None makes an accidental return to a 3-D twist
+  # command fail its construction-time invariant.
+  loco_mpc.vel_cmd_name = None
   loco_mpc.asset_cfg = SceneEntityCfg("robot", site_names=JINGCHU01_FEET_SITE_NAMES)
   loco_mpc.left_foot_site_name = "left_foot_site"
   loco_mpc.right_foot_site_name = "right_foot_site"
@@ -401,11 +430,10 @@ def jingchu01_mpc_rl_mimic_contact_env_cfg(
       kd=DAMPING,
     )
   }
-  for group in ("actor", "critic"):
-    cfg.observations[group].terms.pop("motion_reference", None)
-  cfg.observations["actor"].terms["motion_reference_preview"] = ObservationTermCfg(
-    func=mimic_mdp.motion_reference_preview, params={"command_name": "motion", "frame_offset": 1}
-  )
+  # _add_motion_reference has installed the current [q_ref, dq_ref] command
+  # in both groups.  Do not replace it with a one-frame-ahead preview: the
+  # action term tracks the current frame, and an actor that only sees t+1 is
+  # unnecessarily partially observed.
   cfg.observations["critic"].terms["mpc_reference_centroidal"] = ObservationTermCfg(
     func=jingchu01_mpc_mimic_mdp.mpc_reference_centroidal, params={"command_name": "loco_mpc"}
   )
@@ -413,8 +441,6 @@ def jingchu01_mpc_rl_mimic_contact_env_cfg(
     ("mpc_com_ref", jingchu01_mpc_mimic_mdp.mpc_com_ref),
     ("mpc_k_ref", jingchu01_mpc_mimic_mdp.mpc_ang_mom_ref),
     ("mpc_contact_force_ref", jingchu01_mpc_mimic_mdp.mpc_contact_force_ref),
-    ("mpc_contact_plan_ref", jingchu01_mpc_mimic_mdp.mpc_contact_plan_ref),
-    ("mpc_contact_plan_valid", jingchu01_mpc_mimic_mdp.mpc_contact_plan_valid),
   ):
     cfg.observations["critic"].terms[name] = ObservationTermCfg(func=func, params={"command_name": "loco_mpc"})
   cfg.terminations["motion_clip_end"] = TerminationTermCfg(

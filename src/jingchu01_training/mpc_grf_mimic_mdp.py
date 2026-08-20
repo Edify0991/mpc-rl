@@ -37,6 +37,10 @@ if TYPE_CHECKING:
 class MimicLocoMPCCommandCfg(baseline.LocoMPCCommandCfg):
   """Configuration for fixed-plan, reference-centroidal mimic MPC."""
 
+  # Inherited for dataclass/config compatibility with LocoMPCCommandCfg, but
+  # deliberately unused here: reference motion, rather than a 3-D twist,
+  # owns every MPC target in this command.
+  vel_cmd_name: str | None = None
   motion_command_name: str | None = None
   # These fields are MPC data, not local joint-tracker data.  They define the
   # model-matched bodies used to reconstruct c, l, k and the nominal contacts.
@@ -105,6 +109,11 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
   cfg: MimicLocoMPCCommandCfg
 
   def __init__(self, cfg: MimicLocoMPCCommandCfg, env: "ManagerBasedRlEnv") -> None:
+    if cfg.vel_cmd_name is not None:
+      raise ValueError(
+        "MimicLocoMPCCommand must not consume a velocity command; "
+        "set vel_cmd_name=None and provide motion_command_name."
+      )
     super().__init__(cfg, env)
     body_ids = self._robot.indexing.body_ids.detach().cpu().numpy()
     if len(body_ids) != self._robot.data.body_link_pos_w.shape[1]:
@@ -476,20 +485,6 @@ def mpc_contact_moment_ref(env: "ManagerBasedRlEnv", command_name: str = "loco_m
   if not isinstance(term, MimicLocoMPCCommand):
     return torch.zeros(env.num_envs, 6, device=env.device)
   return term._moment_mpc_target.reshape(env.num_envs, 6)
-
-
-def mpc_contact_plan_ref(env: "ManagerBasedRlEnv", command_name: str = "loco_mpc") -> Tensor:
-  term = env.command_manager.get_term(command_name)
-  if not isinstance(term, MimicLocoMPCCommand):
-    return torch.zeros(env.num_envs, 2, device=env.device)
-  return term._contact_plan_mpc.reshape(env.num_envs, -1)
-
-
-def mpc_contact_plan_valid(env: "ManagerBasedRlEnv", command_name: str = "loco_mpc") -> Tensor:
-  term = env.command_manager.get_term(command_name)
-  if not isinstance(term, MimicLocoMPCCommand):
-    return torch.zeros(env.num_envs, 1, device=env.device)
-  return term._contact_plan_valid.to(dtype=torch.float32)
 
 
 def __getattr__(name: str):

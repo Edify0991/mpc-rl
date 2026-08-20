@@ -15,8 +15,10 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from mjlab.managers.command_manager import CommandTerm, CommandTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
+from mjlab.utils.lab_api.math import quat_apply
 
 from training_common.reference_centroidal import prealign_reference_kinematics_to_initial_anchor
 
@@ -47,6 +49,14 @@ class MotionReferenceCommandCfg(CommandTermCfg):
   reference_frame_alignment: str = "initial_anchor"  # "none" | "initial_anchor"
   loop: bool = True
   random_start: bool = True
+  # BeyondMimic-style failure-biased clip sampling. Bins are one policy
+  # second wide by default; the uniform component keeps all frames reachable.
+  adaptive_sampling: bool = True
+  adaptive_bin_length_s: float = 1.0
+  adaptive_kernel_size: int = 1
+  adaptive_lambda: float = 0.8
+  adaptive_uniform_ratio: float = 0.1
+  adaptive_alpha: float = 0.001
   resampling_time_range: tuple[float, float] = (1.0e9, 1.0e9)
 
   def build(self, env: "ManagerBasedRlEnv") -> "MotionReferenceCommand":
@@ -224,6 +234,10 @@ class MotionReferenceCommand(CommandTerm):
       self.anchor_index = list(resolved_body_names).index(cfg.anchor_body_name)
     except ValueError as exc:
       raise ValueError("anchor_body_name must be included in body_names") from exc
+    # Jingchu01 deliberately uses Robotbase as both tracking anchor and
+    # floating-base root. Store its MuJoCo model id explicitly so reset can
+    # convert the clip's CoM velocity into generalized root velocity.
+    self._anchor_body_model_id = int(self.robot.indexing.body_ids[self.body_ids[self.anchor_index]])
 
     if cfg.reference_frame_alignment not in {"none", "initial_anchor"}:
       raise ValueError("reference_frame_alignment must be 'none' or 'initial_anchor'")
@@ -245,7 +259,27 @@ class MotionReferenceCommand(CommandTerm):
 
     self._frame = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
     self._frame_progress = torch.zeros(self.num_envs, device=self.device)
+    if cfg.adaptive_bin_length_s <= 0.0:
+      raise ValueError("adaptive_bin_length_s must be positive")
+    if cfg.adaptive_kernel_size < 1:
+      raise ValueError("adaptive_kernel_size must be at least one")
+    if not 0.0 <= cfg.adaptive_uniform_ratio <= 1.0:
+      raise ValueError("adaptive_uniform_ratio must lie in [0, 1]")
+    if not 0.0 <= cfg.adaptive_alpha <= 1.0:
+      raise ValueError("adaptive_alpha must lie in [0, 1]")
+    if not 0.0 <= cfg.adaptive_lambda <= 1.0:
+      raise ValueError("adaptive_lambda must lie in [0, 1]")
+    frames_per_bin = max(1, int(round(cfg.adaptive_bin_length_s * self.fps)))
+    self._adaptive_bin_count = max(1, (self.num_frames + frames_per_bin - 1) // frames_per_bin)
+    self._adaptive_failure = torch.zeros(self._adaptive_bin_count, device=self.device)
+    self._adaptive_kernel = torch.tensor(
+      [cfg.adaptive_lambda**i for i in range(cfg.adaptive_kernel_size)], device=self.device,
+    )
+    self._adaptive_kernel /= self._adaptive_kernel.sum()
     self.metrics["joint_pos_error"] = torch.zeros(self.num_envs, device=self.device)
+    self.metrics["sampling_entropy"] = torch.zeros(self.num_envs, device=self.device)
+    self.metrics["sampling_top1_prob"] = torch.zeros(self.num_envs, device=self.device)
+    self.metrics["sampling_top1_bin"] = torch.zeros(self.num_envs, device=self.device)
 
   @property
   def command(self) -> torch.Tensor:
@@ -294,17 +328,15 @@ class MotionReferenceCommand(CommandTerm):
     """Continuously sampled reference body orientations for a frozen tracker."""
     return self.sample_reference_tensor(self._body_quat, self._frame_progress, quaternion=True)[:, self.motion_body_ids]
 
-  def joint_reference_frame_offset(self, frame_offset: int = 1) -> torch.Tensor:
-    """One causal reference preview ``[q_ref, dq_ref]`` at a clip-frame offset."""
-    if frame_offset < 0:
-      raise ValueError("frame_offset must be non-negative")
-    frames = self._normalize_frame_progress(self._frame_progress + float(frame_offset))
-    q = self.sample_reference_tensor(self._q, frames)[:, self.motion_joint_ids]
-    dq = self.sample_reference_tensor(self._dq, frames)[:, self.motion_joint_ids]
-    if not self.cfg.loop:
-      valid = (self._frame_progress + frame_offset) < self.num_frames - 1
-      dq = torch.where(valid.unsqueeze(-1), dq, torch.zeros_like(dq))
-    return torch.cat([q, dq], dim=-1)
+  @property
+  def body_lin_vel_w(self) -> torch.Tensor:
+    """Reference body linear velocity at the clip's declared point."""
+    return self.sample_reference_tensor(self._body_lin_vel, self._frame_progress)[:, self.motion_body_ids]
+
+  @property
+  def body_ang_vel_w(self) -> torch.Tensor:
+    """Reference body angular velocity in world axes."""
+    return self.sample_reference_tensor(self._body_ang_vel, self._frame_progress)[:, self.motion_body_ids]
 
   def reference_body_kinematics(
     self, names: tuple[str, ...], label: str,
@@ -362,12 +394,105 @@ class MotionReferenceCommand(CommandTerm):
   def _update_metrics(self) -> None:
     self.metrics["joint_pos_error"] += (self.joint_pos - self.robot_joint_pos).norm(dim=-1)
 
+  def _model_field_per_env(self, name: str) -> torch.Tensor:
+    """Read a MuJoCo model field in a normalized ``[E, ...]`` layout."""
+    value = getattr(self._env.sim.model, name, None)
+    if value is None:
+      raise RuntimeError(f"Simulator model does not expose required field {name!r}")
+    tensor = torch.as_tensor(value, device=self.device, dtype=self._body_pos.dtype)
+    if tensor.ndim == 0:
+      return tensor.expand(self.num_envs).clone()
+    if tensor.shape[0] != self.num_envs:
+      return tensor.unsqueeze(0).expand(self.num_envs, *tensor.shape)
+    return tensor
+
+  def _anchor_root_linear_velocity_w(
+    self, anchor_quat_w: torch.Tensor, anchor_lin_vel_w: torch.Tensor, anchor_ang_vel_w: torch.Tensor,
+  ) -> torch.Tensor:
+    """Convert a reference anchor CoM velocity to root-link-origin velocity.
+
+    ``body_pos_w`` is at link origins while the normal BeyondMimic/MJLab
+    ``body_lin_vel_w`` contract is inertial-CoM velocity. MuJoCo's free-joint
+    translational velocity is at the root-link origin, requiring the
+    ``omega x r_com`` shift before the reset write.
+    """
+    if self.motion.clip.body_linear_velocity_point == "link_origin":
+      return anchor_lin_vel_w
+    offset_b = self._model_field_per_env("body_ipos")[:, self._anchor_body_model_id]
+    offset_w = quat_apply(anchor_quat_w, offset_b)
+    return anchor_lin_vel_w - torch.cross(anchor_ang_vel_w, offset_w, dim=-1)
+
+  def _adaptive_start_frames(self, env_ids: torch.Tensor) -> torch.Tensor:
+    """Sample reference frames using BeyondMimic's failure-biased bins."""
+    if not self.cfg.adaptive_sampling:
+      return torch.randint(self.num_frames, (len(env_ids),), device=self.device)
+
+    terminated = self._env.termination_manager.terminated[env_ids]
+    if bool(terminated.any()):
+      failed_frames = self._frame_progress[env_ids][terminated]
+      failed_bins = (failed_frames * self._adaptive_bin_count / self.num_frames).long()
+      failed_bins.clamp_(0, self._adaptive_bin_count - 1)
+      failures = torch.bincount(failed_bins, minlength=self._adaptive_bin_count).to(self._adaptive_failure.dtype)
+      self._adaptive_failure.mul_(1.0 - self.cfg.adaptive_alpha).add_(failures, alpha=self.cfg.adaptive_alpha)
+
+    probabilities = self._adaptive_failure + self.cfg.adaptive_uniform_ratio / self._adaptive_bin_count
+    probabilities = F.pad(
+      probabilities.view(1, 1, -1), (0, self.cfg.adaptive_kernel_size - 1), mode="replicate",
+    )
+    probabilities = F.conv1d(probabilities, self._adaptive_kernel.view(1, 1, -1)).view(-1)
+    probabilities /= probabilities.sum().clamp_min(1.0e-12)
+    sampled_bins = torch.multinomial(probabilities, len(env_ids), replacement=True)
+    frames = (
+      (sampled_bins.to(torch.float32) + torch.rand(len(env_ids), device=self.device))
+      / self._adaptive_bin_count * (self.num_frames - 1)
+    ).long()
+
+    entropy = -(probabilities * probabilities.clamp_min(1.0e-12).log()).sum()
+    normalized_entropy = entropy / float(np.log(self._adaptive_bin_count)) if self._adaptive_bin_count > 1 else 1.0
+    top_prob, top_bin = probabilities.max(dim=0)
+    self.metrics["sampling_entropy"][:] = normalized_entropy
+    self.metrics["sampling_top1_prob"][:] = top_prob
+    self.metrics["sampling_top1_bin"][:] = top_bin.to(torch.float32) / self._adaptive_bin_count
+    return frames
+
+  def _write_reference_reset_state(self, env_ids: torch.Tensor) -> None:
+    """Write root pose/velocity and joint state from the sampled reference."""
+    anchor_pos_w = self.body_pos_w[:, self.anchor_index]
+    anchor_quat_w = self.body_quat_w[:, self.anchor_index]
+    anchor_lin_vel_w = self.body_lin_vel_w[:, self.anchor_index]
+    anchor_ang_vel_w = self.body_ang_vel_w[:, self.anchor_index]
+    root_lin_vel_w = self._anchor_root_linear_velocity_w(
+      anchor_quat_w, anchor_lin_vel_w, anchor_ang_vel_w,
+    )
+    root_state = self.robot.data.default_root_state[env_ids].clone()
+    root_state[:, :3] = anchor_pos_w[env_ids]
+    root_state[:, 3:7] = anchor_quat_w[env_ids]
+    root_state[:, 7:10] = root_lin_vel_w[env_ids]
+    root_state[:, 10:13] = anchor_ang_vel_w[env_ids]
+
+    joint_pos = self.robot.data.default_joint_pos[env_ids].clone()
+    joint_vel = self.robot.data.default_joint_vel[env_ids].clone()
+    reference_q, reference_dq = self.joint_pos[env_ids], self.joint_vel[env_ids]
+    limits = getattr(self.robot.data, "soft_joint_pos_limits", None)
+    if limits is not None:
+      selected_limits = limits[env_ids][:, self.joint_ids]
+      reference_q = reference_q.clamp(selected_limits[..., 0], selected_limits[..., 1])
+    joint_pos[:, self.joint_ids] = reference_q
+    joint_vel[:, self.joint_ids] = reference_dq
+    self.robot.write_root_state_to_sim(root_state, env_ids=env_ids)
+    self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
+
   def _resample_command(self, env_ids: torch.Tensor) -> None:
+    if len(env_ids) == 0:
+      return
     if self.cfg.random_start:
-      self._frame_progress[env_ids] = torch.randint(self.num_frames, (len(env_ids),), device=self.device).float()
+      self._frame_progress[env_ids] = self._adaptive_start_frames(env_ids).to(self._frame_progress.dtype)
     else:
       self._frame_progress[env_ids] = 0.0
     self._frame[env_ids] = self._frame_progress[env_ids].long()
+    # Match BeyondMimic's reset contract. The first MimicLocoMPC solve thus
+    # reads x0 from this sampled root/joint state, not a standing reset.
+    self._write_reference_reset_state(env_ids)
 
   def _update_command(self) -> None:
     self._frame_progress += self.fps * self._env.step_dt
@@ -388,13 +513,6 @@ def _motion(env: "ManagerBasedRlEnv", command_name: str) -> MotionReferenceComma
 def motion_reference(env: "ManagerBasedRlEnv", command_name: str = "motion") -> torch.Tensor:
   """Deployable tracker input: named q/dq reference at the current phase."""
   return _motion(env, command_name).command
-
-
-def motion_reference_preview(
-  env: "ManagerBasedRlEnv", command_name: str = "motion", frame_offset: int = 1
-) -> torch.Tensor:
-  """Causal one-frame motion-reference preview for the policy actor."""
-  return _motion(env, command_name).joint_reference_frame_offset(frame_offset)
 
 
 def motion_clip_complete(env: "ManagerBasedRlEnv", command_name: str = "motion") -> torch.Tensor:
