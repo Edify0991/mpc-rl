@@ -21,7 +21,8 @@ def _build_augmented(A, B_s, Wy, Wu, Wf, nx, nu):
     I_nu = jnp.eye(nu)
 
     A_bar_s = jnp.zeros((Bn, Np, nb, nb))
-    A_bar_s = A_bar_s.at[:, :, :nx, :nx].set(A.reshape(1, 1, nx, nx))
+    A_env = A.reshape(Bn, 1, nx, nx) if A.ndim == 3 else A.reshape(1, 1, nx, nx)
+    A_bar_s = A_bar_s.at[:, :, :nx, :nx].set(A_env)
     A_bar_s = A_bar_s.at[:, :, :nx, nx:].set(B_s)
     A_bar_s = A_bar_s.at[:, :, nx:, nx:].set(I_nu.reshape(1, 1, nu, nu))
 
@@ -39,7 +40,7 @@ def solve_batch(A, B_s, e, Wy, Wu, Wdu, Wf,
                 rho=1.0, maxiter=200, eta=0.999, accel=True):
     """Batched PiMPC ADMM solve (per-env per-step dynamics)."""
     B, Np = B_s.shape[0], B_s.shape[1]
-    nx, nu = A.shape[0], B_s.shape[3]
+    nx, nu = A.shape[-1], B_s.shape[3]
     nb = nx + nu
 
     A_bar_s, B_bar_s, Q_bar, Q_bar_N = _build_augmented(A, B_s, Wy, Wu, Wf, nx, nu)
@@ -168,7 +169,7 @@ class PiMPCSolver:
                 du = 1.0 / jnp.sqrt(jnp.diag(Wu))
                 Dx, Dxi = jnp.diag(dx), jnp.diag(1.0 / dx)
                 Du, Dui = jnp.diag(du), jnp.diag(1.0 / du)
-                A = Dxi @ A @ Dx
+                A = jnp.einsum("ij,bjk,kl->bil", Dxi, A, Dx) if A.ndim == 3 else Dxi @ A @ Dx
                 B_s = jnp.einsum("ij,bkjl,lm->bkim", Dxi, B_s, Du)
                 e = e @ Dxi
                 Wy, Wf = Dx @ Wy @ Dx, Dx @ Wf @ Dx
@@ -195,7 +196,7 @@ class PiMPCSolver:
         s = lambda *shp: jax.ShapeDtypeStruct(shp, self.dtype)
         B, N, nx, nu = self.B, self.N, self.nx, self.nu
         self._compiled = self._jit.lower(
-            s(nx, nx), s(B, N, nx, nu), s(B, nx), s(nx, nx), s(nu, nu), s(nu, nu),
+            s(B, nx, nx), s(B, N, nx, nu), s(B, nx), s(nx, nx), s(nu, nu), s(nu, nu),
             s(nx, nx), s(B, nx), s(B, nu), s(B, nx, N), s(B, nu, N),
             s(B, nu, N), s(B, nu, N), s(),
         ).compile()

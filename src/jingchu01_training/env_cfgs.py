@@ -11,10 +11,12 @@ from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
+from mjlab.managers.event_manager import EventTermCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg, RayCastSensorCfg
 from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp import SceneEntityCfg, UniformVelocityCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
+from mjlab.envs.mdp import dr
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from . import hybrid_mimic, mimic_mdp
@@ -132,6 +134,8 @@ def jingchu01_mpc_locomotion_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg
   command = Jingchu01LocoMPCCommandCfg(
     debug_vis=play, asset_cfg=SceneEntityCfg("robot", site_names=JINGCHU01_FEET_SITE_NAMES),
     left_foot_site_name="left_foot_site", right_foot_site_name="right_foot_site",
+    left_foot_geom_names=(r"^left_ankle_roll_collision_[0-9]+$",),
+    right_foot_geom_names=(r"^right_ankle_roll_collision_[0-9]+$",),
     mpc_dt=0.07, mpc_horizon=10, mass=JINGCHU01_TOTAL_MASS,
     inertia_body=JINGCHU01_CENTROIDAL_INERTIA_BODY, hip_width=0.15,
     foot_x_toe=JINGCHU01_MPC_FOOT_X_TOE,
@@ -172,6 +176,8 @@ def jingchu01_mpc_loco_manipulation_env_cfg(play: bool = False) -> ManagerBasedR
     asset_cfg=SceneEntityCfg("robot", site_names=JINGCHU01_FEET_SITE_NAMES),
     left_foot_site_name="left_foot_site",
     right_foot_site_name="right_foot_site",
+    left_foot_geom_names=(r"^left_ankle_roll_collision_[0-9]+$",),
+    right_foot_geom_names=(r"^right_ankle_roll_collision_[0-9]+$",),
     solver_type="jax_pimpc",
   )
   return add_push_box_loco_manipulation(
@@ -248,6 +254,22 @@ def jingchu01_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.observations["critic"].terms["foot_height"].params["asset_cfg"].site_names = JINGCHU01_FEET_SITE_NAMES
   cfg.events["foot_friction"].params["asset_cfg"].geom_names = (JINGCHU01_FEET_GEOM_PATTERN,)
   cfg.events["base_com"].params["asset_cfg"].body_names = (JINGCHU01_ANCHOR_BODY_NAME,)
+  # Same model-parameter DR as THEMIS.  The batched MPC snapshot is refreshed
+  # on reset, so its mass and foot friction are not left at nominal values.
+  cfg.events["pd_gains"] = EventTermCfg(
+    mode="startup", func=dr.pd_gains,
+    params={"asset_cfg": SceneEntityCfg("robot"), "kp_range": (0.8, 1.2),
+            "kd_range": (0.8, 1.2), "operation": "scale"},
+  )
+  cfg.events["joint_armature"] = EventTermCfg(
+    mode="startup", func=dr.joint_armature,
+    params={"asset_cfg": SceneEntityCfg("robot"), "ranges": (0.5, 1.5), "operation": "scale"},
+  )
+  cfg.events["body_inertia"] = EventTermCfg(
+    mode="startup", func=dr.pseudo_inertia,
+    params={"asset_cfg": SceneEntityCfg("robot", body_names=(".*",)),
+            "alpha_range": (-0.112, 0.091)},
+  )
 
   # Keep the current repository's velocity-base term name; it is ``upright``
   # rather than ``body_orientation_l2`` in the upstream AMP configuration.
@@ -352,6 +374,10 @@ def jingchu01_mpc_rl_mimic_contact_env_cfg(
   loco_mpc.motion_command_name = "motion"
   loco_mpc.centroidal_body_names = centroidal_body_names or JINGCHU01_BODY_NAMES
   loco_mpc.contact_body_names = JINGCHU01_FEET_BODY_NAMES
+  # An audited 50-Hz clip can carry an explicit [T,2] contact label.  Keeping
+  # this opt-in avoids silently treating an unvalidated height/speed heuristic
+  # as a ground-truth MPC schedule.  The command samples it at mpc_dt.
+  loco_mpc.reference_contact_key = os.environ.get("THEMIS_JINGCHU01_REFERENCE_CONTACT_KEY")
   loco_mpc.contact_point_offsets_b = {
     "left_ankle_roll": (0.0, 0.0, -0.04),
     "right_ankle_roll": (0.0, 0.0, -0.04),
@@ -406,7 +432,7 @@ def jingchu01_mpc_rl_mimic_contact_env_cfg(
     weight=1.0,
     params={
       "command_name": "loco_mpc", "w_com": 4.0, "w_com_vel": 1.0,
-      "w_linear_momentum": 0.02, "w_angular_momentum": 0.10,
+      "w_angular_momentum": 0.10,
     },
   )
   cfg.rewards["mpc_grf_tracking"].weight = 0.05

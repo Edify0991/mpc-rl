@@ -17,7 +17,7 @@ from mjlab.tasks.velocity.mdp.velocity_command import (
     UniformVelocityCommandCfg,
 )
 
-from jingchu01_mpc.centroidal_mpc import CentroidalMPC, MPCConfig, MPCInput
+from jingchu01_mpc.centroidal_mpc import CentroidalMPC, MPCConfig, MPCInput, MPCModelParameters
 from jingchu01_mpc.contact_schedule import make_walking_schedule
 from jingchu01_mpc.loco_manip_mpc import LocoManipMPC, LocoManipMPCConfig, LocoManipMPCInput
 from .jingchu01.jingchu01_constants import (
@@ -67,6 +67,8 @@ class LocoMPCCommandCfg(CommandTermCfg):
     mu_foot: float = JINGCHU01_MPC_MU_FOOT
     mu_foot_yaw: float = JINGCHU01_MPC_MU_FOOT_YAW
     fz_max_foot: float = JINGCHU01_MPC_FZ_MAX_FOOT
+    left_foot_geom_names: tuple[str, ...] = ()
+    right_foot_geom_names: tuple[str, ...] = ()
 
     gait_period: float = 0.9
     duty_factor: float = 0.5
@@ -111,7 +113,7 @@ class LocoMPCCommand(CommandTerm):
 
         self._I_approx = torch.tensor(
             cfg.inertia_body, device=env.device, dtype=torch.float32
-        )
+        ).unsqueeze(0).expand(env.num_envs, -1, -1).clone()
 
         mpc_cfg = MPCConfig(
             N=cfg.mpc_horizon,
@@ -127,6 +129,12 @@ class LocoMPCCommand(CommandTerm):
             unconstrained=cfg.unconstrained,
         )
         self._mpc = CentroidalMPC(mpc_cfg, device=env.device)
+
+        self._robot_body_model_ids = self._robot.indexing.body_ids.detach().to(device=env.device, dtype=torch.long)
+        self._left_foot_geom_model_ids = self._resolve_mpc_geom_ids(cfg.left_foot_geom_names)
+        self._right_foot_geom_model_ids = self._resolve_mpc_geom_ids(cfg.right_foot_geom_names)
+        self._nominal_inertia_trace = self._robot_inertia_trace().clamp_min(1e-8)
+        self._mpc_model_parameters = self._nominal_mpc_model_parameters()
 
         B = env.num_envs
         N = cfg.mpc_horizon
@@ -156,6 +164,59 @@ class LocoMPCCommand(CommandTerm):
         self._rf_landing_target: Tensor = torch.zeros(B, 3, device=env.device)
         self._lf_landing_valid:  Tensor = torch.zeros(B, dtype=torch.bool, device=env.device)
         self._rf_landing_valid:  Tensor = torch.zeros(B, dtype=torch.bool, device=env.device)
+
+    def _resolve_mpc_geom_ids(self, names: tuple[str, ...]) -> Tensor:
+        if not names:
+            return torch.empty(0, device=self.device, dtype=torch.long)
+        local_ids, _ = self._robot.find_geoms(names, preserve_order=False)
+        return self._robot.indexing.geom_ids[local_ids].detach().to(device=self.device, dtype=torch.long)
+
+    def _model_tensor(self, name: str) -> Tensor | None:
+        value = getattr(self._env.sim.model, name, None)
+        if value is None:
+            return None
+        tensor = torch.as_tensor(value, device=self.device, dtype=torch.float32)
+        if tensor.ndim == 0:
+            return tensor.expand(self.num_envs).clone()
+        if tensor.shape[0] != self.num_envs:
+            return tensor.unsqueeze(0).expand(self.num_envs, *tensor.shape).clone()
+        return tensor
+
+    def _robot_inertia_trace(self) -> Tensor:
+        inertia = self._model_tensor("body_inertia")
+        if inertia is None:
+            return torch.ones(self.num_envs, device=self.device)
+        return inertia[:, self._robot_body_model_ids].sum(dim=(-1, -2))
+
+    def _nominal_mpc_model_parameters(self) -> MPCModelParameters:
+        B = self.num_envs
+        return MPCModelParameters(
+            mass=torch.full((B,), self.cfg.mass, device=self.device),
+            foot_friction=torch.full((B, 2), self.cfg.mu_foot, device=self.device),
+            foot_yaw_friction=torch.full((B, 2), self.cfg.mu_foot_yaw, device=self.device),
+            normal_force_limit=torch.full((B, 2), self.cfg.fz_max_foot, device=self.device),
+            centroidal_inertia_body=self._I_approx.clone(),
+        )
+
+    def _sync_mpc_model_parameters(self, env_ids: Tensor) -> None:
+        """Copy reset simulator physics into this command's batched CD-QP model."""
+        if env_ids.numel() == 0:
+            return
+        body_mass = self._model_tensor("body_mass")
+        if body_mass is not None:
+            self._mpc_model_parameters.mass[env_ids] = body_mass[env_ids][:, self._robot_body_model_ids].sum(dim=-1)
+        geom_friction = self._model_tensor("geom_friction")
+        for foot, geom_ids in enumerate((self._left_foot_geom_model_ids, self._right_foot_geom_model_ids)):
+            if geom_friction is not None and geom_ids.numel() > 0:
+                self._mpc_model_parameters.foot_friction[env_ids, foot] = geom_friction[env_ids][:, geom_ids, 0].amin(dim=-1)
+        trace_scale = self._robot_inertia_trace()[env_ids] / self._nominal_inertia_trace[env_ids]
+        nominal_I = torch.as_tensor(self.cfg.inertia_body, device=self.device, dtype=torch.float32)
+        self._I_approx[env_ids] = trace_scale[:, None, None] * nominal_I
+        self._mpc_model_parameters.centroidal_inertia_body = self._I_approx
+        self._mpc_model_parameters.joint_armature = self._model_tensor("dof_armature")
+        self._mpc_model_parameters.actuator_gainprm = self._model_tensor("actuator_gainprm")
+        self._mpc_model_parameters.actuator_biasprm = self._model_tensor("actuator_biasprm")
+        self._mpc_model_parameters.actuator_forcerange = self._model_tensor("actuator_forcerange")
 
     @property
     def command(self) -> Tensor:
@@ -193,12 +254,13 @@ class LocoMPCCommand(CommandTerm):
         dt = cfg.mpc_dt
         device = self.device
         robot = self._robot
+        self._sync_mpc_model_parameters(torch.arange(B, device=device))
 
         c  = robot.data.root_link_pos_w
         lv = robot.data.root_link_lin_vel_w
         av = robot.data.root_link_ang_vel_w
-        l  = lv * cfg.mass
-        k  = av @ self._I_approx
+        l  = lv * self._mpc_model_parameters.mass.unsqueeze(-1)
+        k  = torch.bmm(av.unsqueeze(1), self._I_approx).squeeze(1)
         x0 = torch.cat([c, l, k], dim=-1)
 
         site_pos = robot.data.site_pos_w[:, self._site_ids, :]
@@ -244,11 +306,12 @@ class LocoMPCCommand(CommandTerm):
         z_init = robot.data.default_root_state[:, 2:3]
         x_ref[:, :, 2] = z_init
 
-        x_ref[:, :, 3] = vx_w_k * cfg.mass
-        x_ref[:, :, 4] = vy_w_k * cfg.mass
+        mass = self._mpc_model_parameters.mass
+        x_ref[:, :, 3] = vx_w_k * mass.unsqueeze(1)
+        x_ref[:, :, 4] = vy_w_k * mass.unsqueeze(1)
         x_ref[:, :, 5] = 0.0
 
-        I_zz = float(self._I_approx[2, 2])
+        I_zz = self._I_approx[:, 2, 2]
         x_ref[:, :, 6] = 0.0
         x_ref[:, :, 7] = 0.0
         x_ref[:, :, 8] = (I_zz * wz).unsqueeze(1)
@@ -287,6 +350,7 @@ class LocoMPCCommand(CommandTerm):
             u_ref=u_ref,
             u_prev=self._u_prev,
             c_bar=None,
+            model_parameters=self._mpc_model_parameters,
         )
         with torch.no_grad():
             mpc_out = self._mpc.solve(mpc_in)
@@ -301,7 +365,7 @@ class LocoMPCCommand(CommandTerm):
         x_pred = mpc_out.x_pred.detach()
         self._com_traj = x_pred[:, :, 0:3]
         l_traj = x_pred[:, :, 3:6]
-        self._vel_traj = l_traj / cfg.mass
+        self._vel_traj = l_traj / self._mpc_model_parameters.mass[:, None, None]
         k_pred = x_pred[:, :, 6:9]
         self._k_traj = k_pred
         self._kdot_traj = torch.zeros_like(k_pred)
@@ -457,6 +521,7 @@ class LocoMPCCommand(CommandTerm):
 
     def _resample_command(self, env_ids: Tensor) -> None:
         """Reset MPC warm start for terminated / reset environments."""
+        self._sync_mpc_model_parameters(env_ids)
         self._grf_ref[env_ids]             = 0.0
         self._u_prev[env_ids]              = 0.0
         self._com_traj[env_ids]            = 0.0
@@ -1120,8 +1185,8 @@ class LocoManipMPCCommand(LocoMPCCommand):
         c  = robot.data.root_link_pos_w
         lv = robot.data.root_link_lin_vel_w
         av = robot.data.root_link_ang_vel_w
-        l  = lv * cfg.mass
-        k  = av @ self._I_approx
+        l  = lv * self._mpc_model_parameters.mass.unsqueeze(-1)
+        k  = torch.bmm(av.unsqueeze(1), self._I_approx).squeeze(1)
         x0 = torch.cat([c, l, k], dim=-1)
 
         site_pos  = robot.data.site_pos_w[:, self._site_ids, :]
@@ -1168,10 +1233,11 @@ class LocoManipMPCCommand(LocoMPCCommand):
         x_ref[:, 1:, 0] = c[:, 0:1] + torch.cumsum(vx_w_k[:, :-1] * dt, dim=1)
         x_ref[:, 1:, 1] = c[:, 1:2] + torch.cumsum(vy_w_k[:, :-1] * dt, dim=1)
         x_ref[:, :, 2]  = robot.data.default_root_state[:, 2:3]
-        x_ref[:, :, 3]  = vx_w_k * cfg.mass
-        x_ref[:, :, 4]  = vy_w_k * cfg.mass
+        mass = self._mpc_model_parameters.mass
+        x_ref[:, :, 3]  = vx_w_k * mass.unsqueeze(1)
+        x_ref[:, :, 4]  = vy_w_k * mass.unsqueeze(1)
         x_ref[:, :, 5]  = 0.0
-        I_zz = float(self._I_approx[2, 2])
+        I_zz = self._I_approx[:, 2, 2]
         x_ref[:, :, 6:8] = 0.0
         x_ref[:, :, 8]  = (I_zz * wz).unsqueeze(1)
 
@@ -1287,7 +1353,7 @@ class LocoManipMPCCommand(LocoMPCCommand):
         x_pred = mpc_out.x_pred.detach()
         self._com_traj = x_pred[:, :, 0:3]
         l_traj = x_pred[:, :, 3:6]
-        self._vel_traj = l_traj / cfg.mass
+        self._vel_traj = l_traj / self._mpc_model_parameters.mass[:, None, None]
         k_pred = x_pred[:, :, 6:9]
         self._k_traj = k_pred
         self._kdot_traj = torch.zeros_like(k_pred)

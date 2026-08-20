@@ -17,10 +17,12 @@ from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
+from mjlab.managers.event_manager import EventTermCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg, RayCastSensorCfg
 from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp import SceneEntityCfg, UniformVelocityCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
+from mjlab.envs.mdp import dr
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from . import hybrid_mimic, mimic_mdp
@@ -59,6 +61,8 @@ G1_FOOT_BODIES = ("left_ankle_roll_link", "right_ankle_roll_link")
 G1_FOOT_GEOMS = tuple(
   f"{side}_foot{i}_collision" for side in ("left", "right") for i in range(1, 8)
 )
+G1_LEFT_FOOT_GEOMS = tuple(f"left_foot{i}_collision" for i in range(1, 8))
+G1_RIGHT_FOOT_GEOMS = tuple(f"right_foot{i}_collision" for i in range(1, 8))
 
 
 def _apply_g1_mpc_grf_features(
@@ -165,6 +169,7 @@ def g1_mpc_locomotion_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   command = G1LocoMPCCommandCfg(
     debug_vis=play, asset_cfg=SceneEntityCfg("robot", site_names=G1_FOOT_SITES),
     left_foot_site_name="left_foot", right_foot_site_name="right_foot",
+    left_foot_geom_names=G1_LEFT_FOOT_GEOMS, right_foot_geom_names=G1_RIGHT_FOOT_GEOMS,
     mpc_dt=0.07, mpc_horizon=10, mass=G1_TOTAL_MASS,
     inertia_body=G1_CENTROIDAL_INERTIA_BODY, hip_width=0.15,
     **_g1_mpc_foot_wrench_kwargs(),
@@ -195,6 +200,8 @@ def g1_mpc_loco_manipulation_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg
     asset_cfg=SceneEntityCfg("robot", site_names=G1_FOOT_SITES),
     left_foot_site_name="left_foot",
     right_foot_site_name="right_foot",
+    left_foot_geom_names=G1_LEFT_FOOT_GEOMS,
+    right_foot_geom_names=G1_RIGHT_FOOT_GEOMS,
     solver_type="jax_pimpc",
   )
   return add_push_box_loco_manipulation(
@@ -268,6 +275,22 @@ def g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.observations["critic"].terms["foot_height"].params["asset_cfg"].site_names = G1_FOOT_SITES
   cfg.events["foot_friction"].params["asset_cfg"].geom_names = G1_FOOT_GEOMS
   cfg.events["base_com"].params["asset_cfg"].body_names = ("torso_link",)
+  # Match the THEMIS physical DR family.  ``LocoMPCCommand`` snapshots the
+  # resulting per-environment model on reset and passes mass/friction to MPC.
+  cfg.events["pd_gains"] = EventTermCfg(
+    mode="startup", func=dr.pd_gains,
+    params={"asset_cfg": SceneEntityCfg("robot"), "kp_range": (0.8, 1.2),
+            "kd_range": (0.8, 1.2), "operation": "scale"},
+  )
+  cfg.events["joint_armature"] = EventTermCfg(
+    mode="startup", func=dr.joint_armature,
+    params={"asset_cfg": SceneEntityCfg("robot"), "ranges": (0.5, 1.5), "operation": "scale"},
+  )
+  cfg.events["body_inertia"] = EventTermCfg(
+    mode="startup", func=dr.pseudo_inertia,
+    params={"asset_cfg": SceneEntityCfg("robot", body_names=(".*",)),
+            "alpha_range": (-0.112, 0.091)},
+  )
 
   cfg.rewards["pose"].params["std_standing"] = {r".*": 0.05}
   cfg.rewards["pose"].params["std_walking"] = {
@@ -446,7 +469,7 @@ def g1_mpc_rl_mimic_contact_env_cfg(
     weight=1.0,
     params={
       "command_name": "loco_mpc", "w_com": 4.0, "w_com_vel": 1.0,
-      "w_linear_momentum": 0.02, "w_angular_momentum": 0.10,
+      "w_angular_momentum": 0.10,
     },
   )
   cfg.rewards["mpc_grf_tracking"].weight = 0.05

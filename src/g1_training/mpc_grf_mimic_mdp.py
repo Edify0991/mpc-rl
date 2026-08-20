@@ -106,17 +106,12 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
     body_ids = self._robot.indexing.body_ids.detach().cpu().numpy()
     if len(body_ids) != self._robot.data.body_link_pos_w.shape[1]:
       raise RuntimeError("Articulation body indexing and MJLab body kinematics disagree")
-    model = env.sim.mj_model
-
-    def model_field(name: str) -> Tensor:
-      return torch.as_tensor(np.asarray(getattr(model, name))[body_ids], device=env.device, dtype=torch.float32)
-
-    self._online_body_mass = model_field("body_mass")
-    self._online_body_com_offset_b = model_field("body_ipos")
-    self._online_body_inertia_diag = model_field("body_inertia")
-    self._online_body_inertial_quat_b = model_field("body_iquat")
+    self._online_body_mass = torch.empty(env.num_envs, len(body_ids), device=env.device)
+    self._online_body_com_offset_b = torch.empty(env.num_envs, len(body_ids), 3, device=env.device)
+    self._online_body_inertia_diag = torch.empty(env.num_envs, len(body_ids), 3, device=env.device)
+    self._online_body_inertial_quat_b = torch.empty(env.num_envs, len(body_ids), 4, device=env.device)
+    self._refresh_online_centroidal_model(torch.arange(env.num_envs, device=env.device))
     self._linear_momentum_traj = torch.zeros_like(self._vel_traj)
-    self._linear_momentum_mpc_target = torch.zeros_like(self._com_mpc_target)
     B, N = env.num_envs, cfg.mpc_horizon
     self._u_traj = torch.zeros(B, N, 12, device=env.device)
     self._sigma_traj = torch.zeros(B, N, 2, device=env.device)
@@ -129,12 +124,19 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
     self._reference_motion: MotionReferenceCommand | None = None
     self._reference_centroidal: ReferenceCentroidalTrajectory | None = None
     self._reference_contact_state: Tensor | None = None
+    # Reward and critic observations consume the same articulated state.  The
+    # command manager invalidates this once per environment step, avoiding
+    # duplicate O(num_bodies) centroidal reductions without carrying a stale
+    # state across physics steps.
+    self._centroidal_state_cache: CentroidalState | None = None
 
   def current_centroidal_state(self) -> CentroidalState:
     """Read the exact whole-body centroidal state in simulator-world axes."""
+    if self._centroidal_state_cache is not None:
+      return self._centroidal_state_cache
     data = self._robot.data
     dtype = data.body_link_pos_w.dtype
-    return compute_centroidal_state(
+    self._centroidal_state_cache = compute_centroidal_state(
       body_link_pos_w=data.body_link_pos_w,
       body_link_quat_w=data.body_link_quat_w,
       body_com_lin_vel_w=data.body_com_lin_vel_w,
@@ -144,6 +146,20 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
       body_inertia_diag=self._online_body_inertia_diag.to(dtype=dtype),
       body_inertial_quat_b=self._online_body_inertial_quat_b.to(dtype=dtype),
     )
+    return self._centroidal_state_cache
+
+  def _refresh_online_centroidal_model(self, env_ids: Tensor) -> None:
+    """Refresh the articulated centroidal reduction from simulator DR arrays."""
+    ids = self._robot_body_model_ids
+    for target, name in (
+      (self._online_body_mass, "body_mass"),
+      (self._online_body_com_offset_b, "body_ipos"),
+      (self._online_body_inertia_diag, "body_inertia"),
+      (self._online_body_inertial_quat_b, "body_iquat"),
+    ):
+      value = self._model_tensor(name)
+      if value is not None:
+        target[env_ids] = value[env_ids][:, ids]
 
   def _ensure_reference_data(self, motion: MotionReferenceCommand) -> None:
     """Build immutable c/l/k/contact clip data once, under the MPC owner."""
@@ -274,10 +290,6 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
     t_frac = self.cfg.tracking_lookahead_frac * (N - 1) + self._traj_step * self._env.step_dt / self.cfg.mpc_dt
     idx = min(max(int(t_frac), 0), N - 2)
     alpha = min(max(t_frac - idx, 0.0), 1.0)
-    self._linear_momentum_mpc_target = (
-      (1.0 - alpha) * self._linear_momentum_traj[:, idx]
-      + alpha * self._linear_momentum_traj[:, idx + 1]
-    )
     self._u_mpc_target = (
       (1.0 - alpha) * self._u_traj[:, idx] + alpha * self._u_traj[:, idx + 1]
     )
@@ -291,8 +303,9 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
 
   def _resample_command(self, env_ids: Tensor) -> None:
     super()._resample_command(env_ids)
+    self._refresh_online_centroidal_model(env_ids)
+    self._centroidal_state_cache = None
     self._linear_momentum_traj[env_ids] = 0.0
-    self._linear_momentum_mpc_target[env_ids] = 0.0
     self._u_traj[env_ids] = 0.0
     self._sigma_traj[env_ids] = 0.0
     self._u_mpc_target[env_ids] = 0.0
@@ -319,6 +332,7 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
 
   def _update_command(self) -> None:
     """Solve the same QP as the baseline using exact mimic centroidal data."""
+    self._centroidal_state_cache = None
     self._step_count += 1
     self._traj_step += 1
     self._interpolate_traj_refs()
@@ -328,6 +342,8 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
     cfg, B, N, dt, device, robot = (
       self.cfg, self.num_envs, self.cfg.mpc_horizon, self.cfg.mpc_dt, self.device, self._robot,
     )
+    self._sync_mpc_model_parameters(torch.arange(B, device=device))
+    self._refresh_online_centroidal_model(torch.arange(B, device=device))
     online = self.current_centroidal_state()
     c, linear_momentum, k = online.com_pos_w, online.linear_momentum_w, online.angular_momentum_w
     x0 = torch.cat([c, linear_momentum, k], dim=-1)
@@ -362,7 +378,7 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
 
     mpc_in = baseline.MPCInput(
       x0=x0, schedule=schedule, x_ref=x_ref, u_ref=torch.zeros(B, N, 12, device=device),
-      u_prev=self._u_prev, c_bar=None,
+      u_prev=self._u_prev, c_bar=None, model_parameters=self._mpc_model_parameters,
     )
     with torch.no_grad():
       mpc_out = self._mpc.solve(mpc_in)
@@ -371,7 +387,7 @@ class MimicLocoMPCCommand(baseline.LocoMPCCommand):
     x_pred = mpc_out.x_pred.detach()
     self._com_traj = x_pred[:, :, :3]
     self._linear_momentum_traj = x_pred[:, :, 3:6]
-    self._vel_traj = self._linear_momentum_traj / cfg.mass
+    self._vel_traj = self._linear_momentum_traj / self._mpc_model_parameters.mass[:, None, None]
     k_pred = x_pred[:, :, 6:9]
     self._k_traj = k_pred
     self._kdot_traj = torch.zeros_like(k_pred)
@@ -431,7 +447,7 @@ class MpcExactCentroidalLandmarkTracking:
 
   def __call__(
     self, env: "ManagerBasedRlEnv", command_name: str = "loco_mpc", w_com: float = 4.0,
-    w_com_vel: float = 1.0, w_linear_momentum: float = 0.02, w_angular_momentum: float = 0.10,
+    w_com_vel: float = 1.0, w_angular_momentum: float = 0.10,
   ) -> Tensor:
     term = env.command_manager.get_term(command_name)
     if not isinstance(term, MimicLocoMPCCommand):
@@ -440,7 +456,6 @@ class MpcExactCentroidalLandmarkTracking:
     loss = (
       w_com * (state.com_pos_w - term._com_mpc_target).square().sum(dim=-1)
       + w_com_vel * (state.com_vel_w - term._com_vel_mpc_target).square().sum(dim=-1)
-      + w_linear_momentum * (state.linear_momentum_w - term._linear_momentum_mpc_target).square().sum(dim=-1)
       + w_angular_momentum * (state.angular_momentum_w - term._k_mpc_target).square().sum(dim=-1)
     )
     return torch.exp(-loss)

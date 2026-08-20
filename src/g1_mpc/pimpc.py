@@ -365,7 +365,12 @@ def _solve_batch(m: Model, x0, u0, yref, uref, w,
                 f"when using per-env per-step dynamics."
             )
         A_bar_s = torch.zeros(B, Np, nx_bar, nx_bar, device=dev, dtype=dt)
-        A_bar_s[:, :, :nx, :nx] = m.A.view(1, 1, nx, nx)
+        if m.A.dim() == 3:
+            if m.A.shape != (B, nx, nx):
+                raise ValueError("Batched dynamics A must have shape [B, nx, nx]")
+            A_bar_s[:, :, :nx, :nx] = m.A.unsqueeze(1)
+        else:
+            A_bar_s[:, :, :nx, :nx] = m.A.view(1, 1, nx, nx)
         A_bar_s[:, :, :nx, nx:] = m.B
         A_bar_s[:, :, nx:, nx:] = I_nu.view(1, 1, nu, nu)
 
@@ -399,7 +404,12 @@ def _solve_batch(m: Model, x0, u0, yref, uref, w,
     C_bar = torch.zeros(ny, nx_bar, device=dev, dtype=dt)
     C_bar[:, :nx] = m.C
 
-    e_bar = torch.cat([m.e, torch.zeros(nu, device=dev, dtype=dt)])
+    if m.e.dim() == 2:
+        if m.e.shape != (B, nx):
+            raise ValueError("Batched affine term e must have shape [B, nx]")
+        e_bar = torch.cat([m.e, torch.zeros(B, nu, device=dev, dtype=dt)], dim=1)
+    else:
+        e_bar = torch.cat([m.e, torch.zeros(nu, device=dev, dtype=dt)])
     w_bar = torch.cat([w.expand(B, -1), torch.zeros(B, nu, device=dev, dtype=dt)], dim=1)
 
     xmin_bar = torch.cat([m.xmin, m.umin])
@@ -512,7 +522,7 @@ def _solve_batch(m: Model, x0, u0, yref, uref, w,
     Z_prev = Z.clone(); V_prev = V.clone()
     Theta_prev = Theta.clone(); Beta_prev = Beta.clone(); Lambda_prev = Lambda.clone()
 
-    e_b = e_bar.view(1, nx_bar, 1)
+    e_b = e_bar.unsqueeze(-1) if e_bar.dim() == 2 else e_bar.view(1, nx_bar, 1)
     w_b = w_bar.unsqueeze(2)
 
     residuals = []

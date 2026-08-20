@@ -1,10 +1,13 @@
-"""G1-only multi-critic PPO for MPC-guided motion imitation.
+"""Multi-critic PPO for MPC-guided motion imitation.
 
 The environment still exposes the scalar reward expected by MJLab, while this
 runner reads the reward manager's per-term contributions after every step and
 forms four *exactly additive* reward channels: MPC landmark, motion imitation,
-task/stability, and regularization.  PPO uses the sum of their GAE advantages
-for its actor update and trains one independent privileged critic per channel.
+task/stability, and regularization.  PPO uses a configured fixed linear
+combination of their GAE advantages for the actor update and trains one
+independent privileged critic per channel.  Jingchu01 Phase-1 uses
+``(1.5, 1.0, 1.0, 1.0)`` to prioritize MPC landmarks; this is deliberately a
+non-adaptive baseline.
 """
 
 from __future__ import annotations
@@ -29,6 +32,11 @@ if TYPE_CHECKING:
 
 
 CRITIC_NAMES = ("mpc_landmark", "mimic", "task", "regularization")
+# Fixed Phase-1 scalarization.  This is intentionally not an adaptive gate:
+# the MPC-landmark advantage is emphasized while the motion-mimic critic
+# remains active.  Any future state-dependent fusion must be applied to the
+# stored per-transition rewards before GAE, not multiplied onto completed GAE.
+JINGCHU01_MIMIC_ACTOR_ADVANTAGE_WEIGHTS = (1.5, 1.0, 1.0, 1.0)
 _REGULARIZATION_TERMS = frozenset({
   "dof_pos_limits", "action_rate_l2", "hybrid_torque", "residual_action",
   "hierarchical_mpc_parameter",
@@ -42,7 +50,7 @@ class MultiCriticPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
   class_name: str = "jingchu01_training.multi_critic:MultiCriticPPO"
   critic_names: tuple[str, ...] = CRITIC_NAMES
   critic_value_loss_coefficients: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0)
-  actor_advantage_weights: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0)
+  actor_advantage_weights: tuple[float, ...] = JINGCHU01_MIMIC_ACTOR_ADVANTAGE_WEIGHTS
 
 
 def reward_group_for_term(name: str) -> str:
@@ -170,7 +178,7 @@ class MultiCriticPPO:
     *,
     critic_names: tuple[str, ...] = CRITIC_NAMES,
     critic_value_loss_coefficients: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0),
-    actor_advantage_weights: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0),
+    actor_advantage_weights: tuple[float, ...] = JINGCHU01_MIMIC_ACTOR_ADVANTAGE_WEIGHTS,
     num_learning_epochs: int = 5,
     num_mini_batches: int = 4,
     clip_param: float = 0.2,

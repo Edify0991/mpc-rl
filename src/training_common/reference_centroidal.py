@@ -137,33 +137,43 @@ def compute_centroidal_state(
     ("body_link_quat_w", body_link_quat_w, (environments, bodies, 4)),
     ("body_com_lin_vel_w", body_com_lin_vel_w, (environments, bodies, 3)),
     ("body_link_ang_vel_w", body_link_ang_vel_w, (environments, bodies, 3)),
-    ("body_mass", body_mass, (bodies,)),
-    ("body_com_offset_b", body_com_offset_b, (bodies, 3)),
-    ("body_inertia_diag", body_inertia_diag, (bodies, 3)),
-    ("body_inertial_quat_b", body_inertial_quat_b, (bodies, 4)),
   ):
     if tuple(value.shape) != expected:
       raise ValueError(f"{name} has shape {tuple(value.shape)}, expected {expected}")
-  total_mass = body_mass.sum()
-  if total_mass <= 0:
+  def _per_env(value: torch.Tensor, tail: tuple[int, ...], name: str) -> torch.Tensor:
+    if tuple(value.shape) == (bodies, *tail):
+      return value.unsqueeze(0).expand(environments, -1, *([-1] * len(tail)))
+    if tuple(value.shape) == (environments, bodies, *tail):
+      return value
+    raise ValueError(
+      f"{name} has shape {tuple(value.shape)}, expected [B,{','.join(map(str, tail))}] "
+      f"or [E,B,{','.join(map(str, tail))}]"
+    )
+
+  body_mass = _per_env(body_mass, (), "body_mass")
+  body_com_offset_b = _per_env(body_com_offset_b, (3,), "body_com_offset_b")
+  body_inertia_diag = _per_env(body_inertia_diag, (3,), "body_inertia_diag")
+  body_inertial_quat_b = _per_env(body_inertial_quat_b, (4,), "body_inertial_quat_b")
+  total_mass = body_mass.sum(dim=1)
+  if torch.any(total_mass <= 0):
     raise ValueError("Total body mass must be positive")
 
-  mass = body_mass.view(1, bodies, 1)
+  mass = body_mass.unsqueeze(-1)
   com_offset_w = quat_apply(
     body_link_quat_w.reshape(-1, 4),
-    body_com_offset_b.expand(environments, -1, -1).reshape(-1, 3),
+    body_com_offset_b.reshape(-1, 3),
   ).reshape(environments, bodies, 3)
   body_com_w = body_link_pos_w + com_offset_w
   # In MJLab, ``body_com_lin_vel_w`` is already the velocity of the rigid
   # body's inertial CoM.  Adding omega×d here would double-shift it.
   body_com_vel_w = body_com_lin_vel_w
-  com_pos_w = (mass * body_com_w).sum(dim=1) / total_mass
-  com_vel_w = (mass * body_com_vel_w).sum(dim=1) / total_mass
-  linear_momentum_w = total_mass * com_vel_w
+  com_pos_w = (mass * body_com_w).sum(dim=1) / total_mass.unsqueeze(-1)
+  com_vel_w = (mass * body_com_vel_w).sum(dim=1) / total_mass.unsqueeze(-1)
+  linear_momentum_w = total_mass.unsqueeze(-1) * com_vel_w
 
-  inertial_quat = body_inertial_quat_b.expand(environments, -1, -1)
+  inertial_quat = body_inertial_quat_b
   inertia_rot = _rotation_matrix(quat_mul(body_link_quat_w, inertial_quat))
-  inertia_b = torch.diag_embed(body_inertia_diag).expand(environments, -1, -1, -1)
+  inertia_b = torch.diag_embed(body_inertia_diag)
   inertia_w = inertia_rot @ inertia_b @ inertia_rot.transpose(-1, -2)
   spin = torch.matmul(inertia_w, body_link_ang_vel_w.unsqueeze(-1)).squeeze(-1)
   orbital = torch.cross(

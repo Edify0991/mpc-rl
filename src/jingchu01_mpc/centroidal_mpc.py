@@ -60,6 +60,27 @@ class MPCConfig:
 
     profile: bool = False
 
+
+@dataclass
+class MPCModelParameters:
+    """Per-environment physical parameters synchronized from the simulator.
+
+    Mass enters ``A, B, d`` and foot friction/normal-force limits enter
+    ``G, h`` (or equivalent PiMPC bounds).  Inertia and actuator values are
+    retained for auditing; a wrench-only centroidal model cannot map them to
+    force constraints without the planned joint-feasibility linearization.
+    """
+
+    mass: Tensor
+    foot_friction: Tensor
+    foot_yaw_friction: Tensor
+    normal_force_limit: Tensor
+    centroidal_inertia_body: Tensor | None = None
+    joint_armature: Tensor | None = None
+    actuator_gainprm: Tensor | None = None
+    actuator_biasprm: Tensor | None = None
+    actuator_forcerange: Tensor | None = None
+
 @dataclass
 class MPCInput:
     """Inputs to the MPC at each control update.  Leading batch dim B on all tensors."""
@@ -69,6 +90,7 @@ class MPCInput:
     u_ref: Tensor
     u_prev: Tensor
     c_bar: Tensor | None = None
+    model_parameters: MPCModelParameters | None = None
 
 @dataclass
 class MPCOutput:
@@ -267,11 +289,56 @@ class CentroidalMPC:
         self._foot_cone_b = torch.zeros(12, device=self.device, dtype=self.dtype)
         self._foot_cone_b[5] = fz_max
 
-    def _build_Bk(self, c_bar: Tensor, schedule: ContactSchedule) -> Tensor:
+    def _model_parameters(self, mpc_in: MPCInput, batch_size: int) -> MPCModelParameters:
+        p = mpc_in.model_parameters
+        if p is None:
+            device, dtype = self.device, self.dtype
+            return MPCModelParameters(
+                mass=torch.full((batch_size,), self.cfg.mass, device=device, dtype=dtype),
+                foot_friction=torch.full((batch_size, 2), self.cfg.mu_foot, device=device, dtype=dtype),
+                foot_yaw_friction=torch.full((batch_size, 2), self.cfg.mu_foot_yaw, device=device, dtype=dtype),
+                normal_force_limit=torch.full((batch_size, 2), self.cfg.fz_max_foot, device=device, dtype=dtype),
+            )
+        mass = p.mass.to(device=self.device, dtype=self.dtype).reshape(-1)
+        if mass.shape != (batch_size,) or torch.any(mass <= 0):
+            raise ValueError("MPCModelParameters.mass must be positive with shape [B]")
+        def _contact(value: Tensor, name: str) -> Tensor:
+            value = value.to(device=self.device, dtype=self.dtype)
+            if value.shape != (batch_size, 2) or torch.any(value <= 0):
+                raise ValueError(f"MPCModelParameters.{name} must be positive with shape [B, 2]")
+            return value
+        return MPCModelParameters(
+            mass=mass, foot_friction=_contact(p.foot_friction, "foot_friction"),
+            foot_yaw_friction=_contact(p.foot_yaw_friction, "foot_yaw_friction"),
+            normal_force_limit=_contact(p.normal_force_limit, "normal_force_limit"),
+            centroidal_inertia_body=p.centroidal_inertia_body,
+            joint_armature=p.joint_armature, actuator_gainprm=p.actuator_gainprm,
+            actuator_biasprm=p.actuator_biasprm, actuator_forcerange=p.actuator_forcerange,
+        )
+
+    def _batched_dynamics(self, p: MPCModelParameters) -> tuple[Tensor, Tensor]:
+        B = p.mass.shape[0]
+        A = self.A.unsqueeze(0).expand(B, -1, -1).clone()
+        A[:, :3, 3:6] = (self.cfg.dt / p.mass).view(B, 1, 1) * torch.eye(3, device=self.device, dtype=self.dtype)
+        d = self.d.unsqueeze(0).expand(B, -1).clone()
+        d[:, 3:6] = p.mass.unsqueeze(-1) * self.cfg.dt * torch.tensor(self.cfg.gravity, device=self.device, dtype=self.dtype)
+        return A, d
+
+    def _contact_cones(self, p: MPCModelParameters) -> tuple[Tensor, Tensor]:
+        B = p.mass.shape[0]
+        G = self._foot_cone_G.view(1, 1, 12, 6).expand(B, 2, -1, -1).clone()
+        for foot in range(2):
+            G[:, foot, 0:4, 2] = -p.foot_friction[:, foot].unsqueeze(-1)
+            G[:, foot, 10:12, 2] = -p.foot_yaw_friction[:, foot].unsqueeze(-1)
+        h = self._foot_cone_b.view(1, 1, 12).expand(B, 2, -1).clone()
+        h[:, :, 5] = p.normal_force_limit
+        return G, h
+
+    def _build_Bk(self, c_bar: Tensor, schedule: ContactSchedule, mass: Tensor) -> Tensor:
         """Per-step input matrix.  Returns (B, N, 9, 12)."""
         cfg = self.cfg
         B, N   = schedule.batch_size, schedule.horizon
-        dt, m  = cfg.dt, cfg.mass
+        dt = cfg.dt
         device, dtype = self.device, self.dtype
 
         I3    = torch.eye(3, device=device, dtype=dtype)
@@ -295,27 +362,26 @@ class CentroidalMPC:
             Et[:, :, 6:9]  = s_RF * _skew(r_RF[:, k, :] - c_k)
             Et[:, :, 9:12] = s_RF * I3.unsqueeze(0)
 
-            Bk[:, k, 0:3, :] = (dt**2 / (2*m)) * Ef
+            Bk[:, k, 0:3, :] = (dt**2 / (2 * mass)).view(B, 1, 1) * Ef
             Bk[:, k, 3:6, :] = dt * Ef
             Bk[:, k, 6:9, :] = dt * Et
 
         return Bk
 
     def _build_prediction_matrices(
-        self, Bk: Tensor
+        self, Bk: Tensor, A: Tensor, d: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Condense dynamics: X = A_cal x0 + B_cal U + D_cal."""
         N  = self.cfg.N
         B  = Bk.shape[0]
         nx, nu = 9, 12
         device, dtype = self.device, self.dtype
-        A, d = self.A, self.d
 
         A_cal = torch.zeros(B, nx*N, nx,   device=device, dtype=dtype)
         B_cal = torch.zeros(B, nx*N, nu*N, device=device, dtype=dtype)
         D_cal = torch.zeros(B, nx*N,       device=device, dtype=dtype)
 
-        A_pow = A.unsqueeze(0).expand(B, -1, -1).clone()
+        A_pow = A.clone()
 
         for i in range(N):
             rs, re = i*nx, (i+1)*nx
@@ -326,20 +392,20 @@ class CentroidalMPC:
                 if i == j:
                     B_cal[:, rs:re, cs:ce] = Bk[:, j, :, :]
                 else:
-                    A_ij = torch.matrix_power(A, i - j).unsqueeze(0)
+                    A_ij = torch.linalg.matrix_power(A, i - j)
                     B_cal[:, rs:re, cs:ce] = torch.bmm(
-                        A_ij.expand(B, -1, -1), Bk[:, j, :, :]
+                        A_ij, Bk[:, j, :, :]
                     )
 
             d_sum = torch.zeros(B, nx, device=device, dtype=dtype)
             for j in range(i + 1):
-                A_ij = torch.matrix_power(A, i - j).unsqueeze(0).expand(B, -1, -1)
+                A_ij = torch.linalg.matrix_power(A, i - j)
                 d_sum += torch.bmm(
-                    A_ij, d.unsqueeze(0).unsqueeze(-1).expand(B, -1, -1)
+                    A_ij, d.unsqueeze(-1)
                 ).squeeze(-1)
             D_cal[:, rs:re] = d_sum
 
-            A_pow = torch.bmm(A_pow, A.unsqueeze(0).expand(B, -1, -1))
+            A_pow = torch.bmm(A_pow, A)
 
         return A_cal, B_cal, D_cal
 
@@ -393,25 +459,24 @@ class CentroidalMPC:
             G = torch.zeros(B, n_ineq, nu*N, device=device, dtype=dtype)
             b = torch.zeros(B, n_ineq,       device=device, dtype=dtype)
 
-            fc_G_base = self._foot_cone_G
-            fc_b      = self._foot_cone_b.unsqueeze(0).expand(B, -1)
+            params = self._model_parameters(mpc_in, B)
+            fc_G, fc_b = self._contact_cones(params)
+            fc_G_LF, fc_G_RF = fc_G[:, 0], fc_G[:, 1]
+            fc_b_LF, fc_b_RF = fc_b[:, 0], fc_b[:, 1]
 
             sch = mpc_in.schedule
             if sch.R_LF is not None and sch.R_RF is not None:
                 T6_LF = _make_T6(sch.R_LF.to(device=device, dtype=dtype))
                 T6_RF = _make_T6(sch.R_RF.to(device=device, dtype=dtype))
-                fc_G_LF = torch.bmm(fc_G_base.unsqueeze(0).expand(B, -1, -1), T6_LF)
-                fc_G_RF = torch.bmm(fc_G_base.unsqueeze(0).expand(B, -1, -1), T6_RF)
-            else:
-                fc_G_LF = fc_G_base.unsqueeze(0).expand(B, -1, -1)
-                fc_G_RF = fc_G_base.unsqueeze(0).expand(B, -1, -1)
+                fc_G_LF = torch.bmm(fc_G_LF, T6_LF)
+                fc_G_RF = torch.bmm(fc_G_RF, T6_RF)
 
             for k in range(N):
                 uo, co = k*nu, k*n_ineq_step
                 G[:, co:co+n_fc,        uo:uo+6]    = fc_G_LF
-                b[:, co:co+n_fc]                     = fc_b
+                b[:, co:co+n_fc]                     = fc_b_LF
                 G[:, co+n_fc:co+2*n_fc, uo+6:uo+12] = fc_G_RF
-                b[:, co+n_fc:co+2*n_fc]              = fc_b
+                b[:, co+n_fc:co+2*n_fc]              = fc_b_RF
 
         lb = torch.full((B, nu*N), -1e6, device=device, dtype=dtype)
         ub = torch.full((B, nu*N),  1e6, device=device, dtype=dtype)
@@ -428,7 +493,7 @@ class CentroidalMPC:
 
         return QPData(H=H, h=h, G=G, b=b, lb=lb, ub=ub)
 
-    def _build_sparse_qp(self, mpc_in: MPCInput, Bk: Tensor) -> QPData:
+    def _build_sparse_qp(self, mpc_in: MPCInput, Bk: Tensor, A: Tensor, d: Tensor) -> QPData:
         """Sparse QP: Z = [x_1,...,x_N, u_0,...,u_{N-1}] ∈ R^{21N}."""
         cfg = self.cfg
         N  = cfg.N
@@ -456,14 +521,14 @@ class CentroidalMPC:
         A_eq = torch.zeros(B, n_eq, n_z, device=device, dtype=dtype)
         b_eq = torch.zeros(B, n_eq,      device=device, dtype=dtype)
         I_nx  = torch.eye(nx, device=device, dtype=dtype)
-        d_B   = self.d.unsqueeze(0).expand(B, -1)
-        rhs_0 = mpc_in.x0 @ self.A.t() + self.d
+        d_B   = d
+        rhs_0 = torch.bmm(A, mpc_in.x0.unsqueeze(-1)).squeeze(-1) + d
 
         for k in range(N):
             rs, re = k*nx, (k+1)*nx
             A_eq[:, rs:re, xs+k*nx : xs+(k+1)*nx] = I_nx
             if k > 0:
-                A_eq[:, rs:re, xs+(k-1)*nx : xs+k*nx] = -self.A
+                A_eq[:, rs:re, xs+(k-1)*nx : xs+k*nx] = -A
             A_eq[:, rs:re, us+k*nu : us+(k+1)*nu] = -Bk[:, k, :, :]
             b_eq[:, rs:re] = rhs_0 if k == 0 else d_B
 
@@ -477,25 +542,24 @@ class CentroidalMPC:
             G = torch.zeros(B, n_ineq, n_z, device=device, dtype=dtype)
             b = torch.zeros(B, n_ineq,      device=device, dtype=dtype)
 
-            fc_G_base = self._foot_cone_G
-            fc_b      = self._foot_cone_b.unsqueeze(0).expand(B, -1)
+            params = self._model_parameters(mpc_in, B)
+            fc_G, fc_b = self._contact_cones(params)
+            fc_G_LF, fc_G_RF = fc_G[:, 0], fc_G[:, 1]
+            fc_b_LF, fc_b_RF = fc_b[:, 0], fc_b[:, 1]
 
             sch = mpc_in.schedule
             if sch.R_LF is not None and sch.R_RF is not None:
                 T6_LF = _make_T6(sch.R_LF.to(device=device, dtype=dtype))
                 T6_RF = _make_T6(sch.R_RF.to(device=device, dtype=dtype))
-                fc_G_LF = torch.bmm(fc_G_base.unsqueeze(0).expand(B, -1, -1), T6_LF)
-                fc_G_RF = torch.bmm(fc_G_base.unsqueeze(0).expand(B, -1, -1), T6_RF)
-            else:
-                fc_G_LF = fc_G_base.unsqueeze(0).expand(B, -1, -1)
-                fc_G_RF = fc_G_base.unsqueeze(0).expand(B, -1, -1)
+                fc_G_LF = torch.bmm(fc_G_LF, T6_LF)
+                fc_G_RF = torch.bmm(fc_G_RF, T6_RF)
 
             for k in range(N):
                 uo, co = us + k*nu, k*n_ineq_step
                 G[:, co:co+n_fc,        uo:uo+6]    = fc_G_LF
-                b[:, co:co+n_fc]                     = fc_b
+                b[:, co:co+n_fc]                     = fc_b_LF
                 G[:, co+n_fc:co+2*n_fc, uo+6:uo+12] = fc_G_RF
-                b[:, co+n_fc:co+2*n_fc]              = fc_b
+                b[:, co+n_fc:co+2*n_fc]              = fc_b_RF
 
         lb = torch.full((B, n_z), -1e6, device=device, dtype=dtype)
         ub = torch.full((B, n_z),  1e6, device=device, dtype=dtype)
@@ -543,6 +607,8 @@ class CentroidalMPC:
 
         t0 = self._tick() if do_profile else 0.0
 
+        params = self._model_parameters(mpc_in, B_batch)
+        A, d = self._batched_dynamics(params)
         if cfg.unconstrained:
             sched_for_B = ContactSchedule(
                 sigma=torch.ones_like(mpc_in.schedule.sigma),
@@ -552,34 +618,29 @@ class CentroidalMPC:
             )
         else:
             sched_for_B = mpc_in.schedule
-        Bk = self._build_Bk(c_bar, sched_for_B)
+        Bk = self._build_Bk(c_bar, sched_for_B, params.mass)
 
         if cfg.unconstrained:
-            umin = torch.full((nu,), -1e6, device=self.device, dtype=self.dtype)
-            umax = torch.full((nu,),  1e6, device=self.device, dtype=self.dtype)
+            umin = torch.full((B_batch, nu), -1e6, device=self.device, dtype=self.dtype)
+            umax = torch.full((B_batch, nu),  1e6, device=self.device, dtype=self.dtype)
         else:
-            mu    = cfg.mu_foot
-            fz_max = cfg.fz_max_foot
             yh    = cfg.foot_y_half
             toe   = cfg.foot_x_toe
             heel  = cfg.foot_x_heel
-            mu_z  = cfg.mu_foot_yaw
-            umin = torch.tensor([
-                -mu*fz_max, -mu*fz_max, 0.0, -yh*fz_max, -heel*fz_max, -mu_z*fz_max,
-                -mu*fz_max, -mu*fz_max, 0.0, -yh*fz_max, -heel*fz_max, -mu_z*fz_max,
-            ], device=self.device, dtype=self.dtype)
-            umax = torch.tensor([
-                mu*fz_max, mu*fz_max, fz_max, yh*fz_max, toe*fz_max, mu_z*fz_max,
-                mu*fz_max, mu*fz_max, fz_max, yh*fz_max, toe*fz_max, mu_z*fz_max,
-            ], device=self.device, dtype=self.dtype)
+            umin = torch.zeros(B_batch, nu, device=self.device, dtype=self.dtype)
+            umax = torch.zeros_like(umin)
+            for foot, offset in enumerate((0, 6)):
+                mu, mu_z, fz = params.foot_friction[:, foot], params.foot_yaw_friction[:, foot], params.normal_force_limit[:, foot]
+                umin[:, offset:offset+6] = torch.stack((-mu*fz, -mu*fz, torch.zeros_like(fz), -yh*fz, -heel*fz, -mu_z*fz), dim=-1)
+                umax[:, offset:offset+6] = torch.stack(( mu*fz,  mu*fz, fz, yh*fz, toe*fz, mu_z*fz), dim=-1)
 
         yref = mpc_in.x_ref[:, 1:N+1, :].permute(0, 2, 1).contiguous()
         uref = mpc_in.u_ref.permute(0, 2, 1).contiguous()
         x0_in = mpc_in.x0
         u0_in = mpc_in.u_prev
 
-        umin_steps = umin.view(1, nu, 1).expand(B_batch, nu, N).clone()
-        umax_steps = umax.view(1, nu, 1).expand(B_batch, nu, N).clone()
+        umin_steps = umin.unsqueeze(-1).expand(-1, -1, N).clone()
+        umax_steps = umax.unsqueeze(-1).expand(-1, -1, N).clone()
         if not cfg.unconstrained:
             sigma   = mpc_in.schedule.sigma
             lf_act  = sigma[:, :, 0:1].permute(0, 2, 1).float()
@@ -589,29 +650,13 @@ class CentroidalMPC:
             umin_steps[:, 6:, :] *= rf_act
             umax_steps[:, 6:, :] *= rf_act
 
-        if cfg.pimpc_precondition:
-            s = self._get_pimpc_ruiz_cache(nu)
-            A_in   = s["A_s"]
-            e_in   = s["e_s"]
-            Wy_in  = s["Wy_s"]
-            Wf_in  = s["Wf_s"]
-            Wu_in  = s["Wu_s"]
-            Wdu_in = s["Wdu_s"]
-            Bk_in   = torch.einsum("ij,bkjl,lm->bkim", s["Dxi"], Bk, s["Du"])
-            x0_in   = x0_in @ s["Dxi"]
-            u0_in   = u0_in @ s["Dui"]
-            yref    = torch.einsum("ij,bjk->bik", s["Dxi"], yref)
-            uref    = torch.einsum("ij,bjk->bik", s["Dui"], uref)
-            umin_st = torch.einsum("ij,bjk->bik", s["Dui"], umin_steps)
-            umax_st = torch.einsum("ij,bjk->bik", s["Dui"], umax_steps)
-            umin_in = s["Dui"] @ umin
-            umax_in = s["Dui"] @ umax
-        else:
-            A_in, e_in, Bk_in = self.A, self.d, Bk
-            Wy_in, Wu_in, Wf_in = self.Q, self.R, self.Qf
-            Wdu_in = cfg.R_delta * torch.eye(nu, device=self.device, dtype=self.dtype)
-            umin_st, umax_st = umin_steps, umax_steps
-            umin_in, umax_in = umin, umax
+        A_in, e_in, Bk_in = A, d, Bk
+        Wy_in, Wu_in, Wf_in = self.Q, self.R, self.Qf
+        Wdu_in = cfg.R_delta * torch.eye(nu, device=self.device, dtype=self.dtype)
+        umin_st, umax_st = umin_steps, umax_steps
+        # Per-environment limits are supplied through ``*_steps``.  PiMPC's
+        # static setup bounds remain a representative row for its bookkeeping.
+        umin_in, umax_in = umin[0], umax[0]
 
         self._pimpc.setup(
             A=A_in, B=Bk_in, Np=N,
@@ -638,11 +683,6 @@ class CentroidalMPC:
 
         x_pred = result.x[:, :, 1:].permute(0, 2, 1).contiguous()
         u_pred = result.u.permute(0, 2, 1).contiguous()
-
-        if cfg.pimpc_precondition:
-            s = self._pimpc_ruiz_cache
-            x_pred = x_pred * s["dx"].view(1, 1, nx)
-            u_pred = u_pred * s["du"].view(1, 1, nu)
 
         t3 = self._tick() if do_profile else 0.0
 
@@ -701,6 +741,8 @@ class CentroidalMPC:
 
         t0 = self._tick() if do_profile else 0.0
 
+        params = self._model_parameters(mpc_in, B_batch)
+        A, d = self._batched_dynamics(params)
         if cfg.unconstrained:
             sched_for_B = ContactSchedule(
                 sigma=torch.ones_like(mpc_in.schedule.sigma),
@@ -710,26 +752,22 @@ class CentroidalMPC:
             )
         else:
             sched_for_B = mpc_in.schedule
-        Bk = self._build_Bk(c_bar, sched_for_B)
+        Bk = self._build_Bk(c_bar, sched_for_B, params.mass)
 
         if cfg.unconstrained:
-            umin = torch.full((nu,), -1e6, device=self.device, dtype=self.dtype)
-            umax = torch.full((nu,),  1e6, device=self.device, dtype=self.dtype)
+            umin = torch.full((B_batch, nu), -1e6, device=self.device, dtype=self.dtype)
+            umax = torch.full((B_batch, nu),  1e6, device=self.device, dtype=self.dtype)
         else:
-            mu, fz_max = cfg.mu_foot, cfg.fz_max_foot
             yh, toe, heel = cfg.foot_y_half, cfg.foot_x_toe, cfg.foot_x_heel
-            mu_z = cfg.mu_foot_yaw
-            umin = torch.tensor([
-                -mu*fz_max, -mu*fz_max, 0.0, -yh*fz_max, -heel*fz_max, -mu_z*fz_max,
-                -mu*fz_max, -mu*fz_max, 0.0, -yh*fz_max, -heel*fz_max, -mu_z*fz_max,
-            ], device=self.device, dtype=self.dtype)
-            umax = torch.tensor([
-                mu*fz_max, mu*fz_max, fz_max, yh*fz_max, toe*fz_max, mu_z*fz_max,
-                mu*fz_max, mu*fz_max, fz_max, yh*fz_max, toe*fz_max, mu_z*fz_max,
-            ], device=self.device, dtype=self.dtype)
+            umin = torch.zeros(B_batch, nu, device=self.device, dtype=self.dtype)
+            umax = torch.zeros_like(umin)
+            for foot, offset in enumerate((0, 6)):
+                mu, mu_z, fz = params.foot_friction[:, foot], params.foot_yaw_friction[:, foot], params.normal_force_limit[:, foot]
+                umin[:, offset:offset+6] = torch.stack((-mu*fz, -mu*fz, torch.zeros_like(fz), -yh*fz, -heel*fz, -mu_z*fz), dim=-1)
+                umax[:, offset:offset+6] = torch.stack(( mu*fz,  mu*fz, fz, yh*fz, toe*fz, mu_z*fz), dim=-1)
 
-        umin_steps = umin.view(1, nu, 1).expand(B_batch, nu, N).clone()
-        umax_steps = umax.view(1, nu, 1).expand(B_batch, nu, N).clone()
+        umin_steps = umin.unsqueeze(-1).expand(-1, -1, N).clone()
+        umax_steps = umax.unsqueeze(-1).expand(-1, -1, N).clone()
         if not cfg.unconstrained:
             sigma   = mpc_in.schedule.sigma
             lf_act  = sigma[:, :, 0:1].permute(0, 2, 1).float()
@@ -754,7 +792,7 @@ class CentroidalMPC:
                 B=B_batch, N=N, nx=nx, nu=nu,
                 maxiter=cfg.admm_max_iter,
                 accel=cfg.pimpc_accel,
-                precondition=cfg.pimpc_precondition,
+                precondition=False,
                 dtype=jax_dtype,
                 compile_now=True,
             )
@@ -762,11 +800,10 @@ class CentroidalMPC:
 
         t1 = self._tick() if do_profile else 0.0
 
-        e_be = self.d.unsqueeze(0).expand(B_batch, nx).contiguous()
         prob = {
-            "A":          _torch_to_jax(self.A),
+            "A":          _torch_to_jax(A),
             "B_s":        _torch_to_jax(Bk),
-            "e":          _torch_to_jax(e_be),
+            "e":          _torch_to_jax(d),
             "Wy":         _torch_to_jax(self.Q),
             "Wu":         _torch_to_jax(self.R),
             "Wdu":        _torch_to_jax(Wdu),
@@ -818,8 +855,10 @@ class CentroidalMPC:
 
         t0 = self._tick() if do_profile else 0.0
 
-        Bk = self._build_Bk(c_bar, mpc_in.schedule)
-        qp = self._build_sparse_qp(mpc_in, Bk)
+        params = self._model_parameters(mpc_in, B)
+        A, d = self._batched_dynamics(params)
+        Bk = self._build_Bk(c_bar, mpc_in.schedule, params.mass)
+        qp = self._build_sparse_qp(mpc_in, Bk, A, d)
 
         if self._warm_Z is None:
             self._warm_Z = torch.cat([
@@ -864,8 +903,10 @@ class CentroidalMPC:
 
         t0 = self._tick() if do_profile else 0.0
 
-        Bk                  = self._build_Bk(c_bar, mpc_in.schedule)
-        A_cal, B_cal, D_cal = self._build_prediction_matrices(Bk)
+        params = self._model_parameters(mpc_in, B)
+        A, d = self._batched_dynamics(params)
+        Bk                  = self._build_Bk(c_bar, mpc_in.schedule, params.mass)
+        A_cal, B_cal, D_cal = self._build_prediction_matrices(Bk, A, d)
         qp                  = self._build_condensed_qp(mpc_in, A_cal, B_cal, D_cal)
 
         t1 = self._tick() if do_profile else 0.0

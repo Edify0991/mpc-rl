@@ -45,17 +45,18 @@ For each channel \(g\), a distinct privileged critic estimates
 A_t^g=\delta_t^g+\gamma\lambda(1-d_t)A_{t+1}^g.
 \]
 
-The PPO actor uses the original total-return objective through
+The G1 PPO actor uses the original total-return objective through
 
 \[
 A_t=\sum_g A_t^g,
 \]
 
 followed by the usual batch normalization.  Each critic is fitted to its own
-GAE return.  Consequently, the policy gradient remains the gradient of the
-unchanged total reward while value regression does not force physically
-different MPC, imitation, stability, and regularization signals into one
-value target.
+GAE return.  Jingchu01 Phase-1 instead uses fixed actor-advantage weights
+`(1.5, 1.0, 1.0, 1.0)`: MPC-landmark advantage is deliberately emphasized while
+the scalar environment-reward log and per-critic value targets remain an exact
+reward partition.  This is a temporary non-adaptive baseline and must be
+ablated against equal weights before claiming a benefit.
 
 ## Implementation
 
