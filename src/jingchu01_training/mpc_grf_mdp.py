@@ -602,7 +602,11 @@ class MpcAngMomTracking:
             return torch.zeros(env.num_envs, device=env.device)
 
         av = term._robot.data.root_link_ang_vel_w
-        k_t = av @ term._I_approx
+        # ``av`` and ``_I_approx`` both carry an environment batch.  Tensor
+        # ``@`` interprets a [B,3] left operand as one 2-D matrix and broadcasts
+        # it against [B,3,3], producing [B,B,3].  Use bmm so every environment
+        # only uses its own randomized centroidal-inertia approximation.
+        k_t = torch.bmm(av.unsqueeze(1), term._I_approx).squeeze(1)
 
         dt = env.step_dt
         k_dot_t = (k_t - self._k_prev) / dt
@@ -838,7 +842,7 @@ def mpc_ang_vel_tracking(
     I_inv = torch.linalg.inv(term._I_approx)
 
     if lookahead_fracs is None:
-        omega_mpc = term._k_mpc_target @ I_inv
+        omega_mpc = torch.bmm(term._k_mpc_target.unsqueeze(1), I_inv).squeeze(1)
         e = omega_cur - omega_mpc
         return torch.exp(-w_ang * e.pow(2).sum(dim=-1))
 
@@ -860,7 +864,7 @@ def mpc_ang_vel_tracking(
         idx = min(max(int(t), 0), N - 2)
         alpha = min(max(t - idx, 0.0), 1.0)
         k_ref = (1 - alpha) * k_traj[:, idx] + alpha * k_traj[:, idx + 1]
-        omega_ref = k_ref @ I_inv
+        omega_ref = torch.bmm(k_ref.unsqueeze(1), I_inv).squeeze(1)
         e = omega_cur - omega_ref
         total = total + weight * w_ang * e.pow(2).sum(dim=-1)
 
