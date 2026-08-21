@@ -58,3 +58,5 @@ plot-sim2sim-centroidal-comparison = "mjlab_tools.plot_sim2sim_centroidal_compar
 csv-to-npz-mjlab = "mjlab_tools.csv_to_npz_mjlab:main"
 replay-npz-mjlab = "mjlab_tools.replay_npz_mjlab:main"
 audit-mimic-reference = "mjlab_tools.audit_mimic_reference:main"
+test-jingchu01-reference-mpc = "mjlab_tools.test_jingchu01_reference_mpc:main"
+test-themis-locomotion-mpc = "mjlab_tools.test_themis_locomotion_mpc:main"

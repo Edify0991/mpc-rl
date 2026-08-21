@@ -271,6 +271,26 @@ def jingchu01_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             "alpha_range": (-0.112, 0.091)},
   )
 
+  # ``variable_posture`` resolves these regex maps once at construction.  The
+  # velocity factory leaves them empty because every robot must supply its own
+  # joint naming/groups; an empty map produces a [0]-length std vector and
+  # crashes against Jingchu01's 28-DOF joint error.  These values mirror the
+  # G1 velocity-task convention: tight standing posture, with progressively
+  # more freedom for leg swing and upper-body motion at higher commanded speed.
+  cfg.rewards["pose"].params["std_standing"] = {r".*": 0.05}
+  cfg.rewards["pose"].params["std_walking"] = {
+    r".*hip_pitch.*": 0.5, r".*hip_roll.*": 0.15, r".*hip_yaw.*": 0.15,
+    r".*knee.*": 0.5, r".*ankle_pitch.*": 0.15, r".*ankle_roll.*": 0.1,
+    r".*waist_yaw.*": 0.15, r".*waist_roll.*": 0.1,
+    r".*shoulder.*": 0.15, r".*elbow.*": 0.1, r".*wrist.*": 0.1,
+  }
+  cfg.rewards["pose"].params["std_running"] = {
+    r".*hip_pitch.*": 0.5, r".*hip_roll.*": 0.25, r".*hip_yaw.*": 0.25,
+    r".*knee.*": 0.5, r".*ankle_pitch.*": 0.25, r".*ankle_roll.*": 0.1,
+    r".*waist_yaw.*": 0.25, r".*waist_roll.*": 0.1,
+    r".*shoulder.*": 0.25, r".*elbow.*": 0.1, r".*wrist.*": 0.1,
+  }
+
   # Keep the current repository's velocity-base term name; it is ``upright``
   # rather than ``body_orientation_l2`` in the upstream AMP configuration.
   cfg.rewards["upright"].params["asset_cfg"].body_names = (JINGCHU01_ANCHOR_BODY_NAME,)
